@@ -126,7 +126,12 @@ impl SidecarClient {
     }
 
     /// Perform a Gemma clip-scoring call (stage 5.3).
-    pub async fn score_clips(&self, words: &[Word], cfg: &Config) -> Result<ScoreClipsResp> {
+    pub async fn score_clips(
+        &self,
+        words: &[Word],
+        cfg: &Config,
+        extra: &[(f64, f64, String)],
+    ) -> Result<ScoreClipsResp> {
         let body = json!({
             "transcript": { "words": words },
             "model": cfg.llm_model,
@@ -134,6 +139,7 @@ impl SidecarClient {
             "min_duration": cfg.min_clip_duration,
             "max_duration": cfg.max_clip_duration,
             "max_tokens": cfg.llm_max_tokens,
+            "extra_candidates": extra.iter().map(|(s, e, src)| json!({"start": s, "end": e, "source": src})).collect::<Vec<_>>(),
         });
         let out: ScoreClipsResp = self.call("/v1/score_clips", body.clone(), "score_clips").await?;
         crate::util::log_llm_call(&self.llm_log, "score_clips", &body, &serde_json::to_value(&out).unwrap_or_default());
@@ -206,6 +212,17 @@ impl SidecarClient {
             last_end
         );
         Ok(Transcript { words: out.words })
+    }
+
+    /// Laughter / applause / loudness analysis of a 16 kHz mono WAV.
+    pub async fn audio_events(
+        &self,
+        wav: &Path,
+        model: &str,
+    ) -> Result<crate::stages::audio_events::AudioEvents> {
+        let wav_abs = wav.canonicalize().unwrap_or_else(|_| wav.to_path_buf());
+        let body = json!({ "audio": wav_abs.display().to_string(), "model": model });
+        self.call("/v1/audio_events", body, "audio_events").await
     }
 
     pub async fn shutdown(&self) {

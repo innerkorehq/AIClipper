@@ -123,6 +123,12 @@ def _windows(n: int) -> list[tuple[int, int]]:
     return spans
 
 
+def _words_in(words: list[dict], start: float, end: float) -> tuple[int, int] | None:
+    """Word index span [lo, hi) overlapping [start, end], or None if empty."""
+    idx = [i for i, w in enumerate(words) if w["end"] > start and w["start"] < end]
+    return (idx[0], idx[-1] + 1) if idx else None
+
+
 def _iou(a: dict, b: dict) -> float:
     inter = max(0.0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
     union = (a["end"] - a["start"]) + (b["end"] - b["start"]) - inter
@@ -173,7 +179,7 @@ def _rate(model_id: str, c: dict, words: list[dict], max_tokens: int) -> tuple[f
         return c["score"] * 0.8, c["rationale"] + " (unrated)", raw
 
 
-def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: float, max_duration: float, max_tokens: int) -> tuple[list[dict], str, str]:
+def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: float, max_duration: float, max_tokens: int, extra: list[dict] | None = None) -> tuple[list[dict], str, str]:
     """Two passes. (1) Propose clips per overlapping transcript window.
     (2) Rate each merged candidate on a fixed rubric; the weighted rubric
     (not the model's free-form number) is the final score."""
@@ -208,6 +214,17 @@ def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: 
             r["lo"] = int(round(float(c["start_word_idx"])))
             r["hi"] = int(round(float(c["end_word_idx"]))) + 1
             proposals.append(r)
+
+    # Moments found by other means (e.g. audio laughter peaks): rate them with
+    # the same rubric. They start with a high proposal score so they survive
+    # the MAX_RATED cut; the rubric then decides.
+    for e in extra or []:
+        span = _words_in(words, float(e["start"]), float(e["end"]))
+        if span is not None:
+            proposals.append({
+                "start": words[span[0]]["start"], "end": words[span[1] - 1]["end"],
+                "score": 0.85, "rationale": str(e.get("source", "audio")), "lo": span[0], "hi": span[1],
+            })
 
     if not proposals:
         raise ValueError("score_clips: model proposed no valid clips")

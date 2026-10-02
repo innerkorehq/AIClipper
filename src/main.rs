@@ -160,16 +160,31 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     // keyed by candidate index only) and the per-frame detection cache.
     let force_clip = cli.force || request_changed(&cfg, &cli)?;
 
+    // ---- 5.2b audio events (laughter / applause / loudness peaks) -------------
+    // Optional signal: any failure just means text-only clip selection.
+    let audio: Option<stages::audio_events::AudioEvents> = if manual || !cfg.audio_events {
+        None
+    } else {
+        let wav = cfg.media_dir().join("source.wav");
+        match run_stage(&store, "audio_events", cli.force, stages::audio_events::analyze(&cfg, &sidecar, &wav)).await {
+            Ok((a, _)) => Some(a),
+            Err(e) => {
+                tracing::warn!("audio analysis unavailable ({e:#}); selecting clips from the transcript only");
+                None
+            }
+        }
+    };
+
     // ---- 5.3 clip selection --------------------------------------------------
     let candidates: Vec<ClipCandidate> = if manual {
         vec![manual_candidate(&cli, &transcript, source.duration)?]
     } else {
         let (found, fresh) =
-            run_stage(&store, "candidates", force_clip, stages::score::score(&cfg, &sidecar, &transcript)).await?;
+            run_stage(&store, "candidates", force_clip, stages::score::score(&cfg, &sidecar, &transcript, audio.as_ref())).await?;
         if found.is_empty() && matches!(fresh, Freshness::Reused) {
             // An empty cached result is a past failure, not an answer — rescore.
             tracing::info!("cached candidates were empty — rescoring");
-            run_stage(&store, "candidates", true, stages::score::score(&cfg, &sidecar, &transcript)).await?.0
+            run_stage(&store, "candidates", true, stages::score::score(&cfg, &sidecar, &transcript, audio.as_ref())).await?.0
         } else {
             found
         }
@@ -296,7 +311,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
             &manifests_id(idx),
             force_clip,
             async {
-                build_manifest(
+                let mut manifest = build_manifest(
                     &format!("clip_{idx:03}"),
                     candidate.start,
                     candidate.end,
@@ -310,7 +325,14 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
                     &segments,
                     TARGET_WIDTH,
                     TARGET_HEIGHT,
-                )
+                )?;
+                // Show captions slightly ahead of the ASR word times (clamped at 0).
+                let lead = cfg.caption_lead_s;
+                for w in &mut manifest.captions {
+                    w.start = (w.start - lead).max(0.0);
+                    w.end = (w.end - lead).max(w.start + 0.05);
+                }
+                Ok(manifest)
             },
         )
         .await?;
@@ -425,8 +447,9 @@ fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> R
 /// this workdir. In that case stale per-clip artifacts and cached frame
 /// detections are cleared. Records the current request either way.
 fn request_changed(cfg: &Config, cli: &cli::Cli) -> Result<bool> {
-    let current = format!("from={:?} to={:?} cuts={}", cli.range_from, cli.range_to, !cli.no_cuts);
-    let default = "from=None to=None cuts=true";
+    // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut).
+    let current = format!("from={:?} to={:?} cuts={} rev=2", cli.range_from, cli.range_to, !cli.no_cuts);
+    let default = "from=None to=None cuts=true rev=2";
     let path = cfg.stage_dir().join("request.txt");
     let previous = std::fs::read_to_string(&path).ok();
     let changed = match &previous {

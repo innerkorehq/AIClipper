@@ -5,14 +5,28 @@
 //! spans from word offsets. Deterministic dedupe/ranking happens here.
 
 use crate::config::Config;
+use crate::stages::audio_events::{candidate_spans, extended_end, AudioEvents};
 use crate::sidecar::{ScoreClipsResp, SidecarClient};
 use crate::types::{ClipCandidate, Transcript, Word};
 use anyhow::{Context, Result};
 
 /// Score the full transcript and return the top `n` non-overlapping candidates.
-pub async fn score(cfg: &Config, client: &SidecarClient, transcript: &Transcript) -> Result<Vec<ClipCandidate>> {
+pub async fn score(
+    cfg: &Config,
+    client: &SidecarClient,
+    transcript: &Transcript,
+    audio: Option<&AudioEvents>,
+) -> Result<Vec<ClipCandidate>> {
+    // Moments the audio says are worth a look (laughter / cheering / loud peaks)
+    // are rated alongside the model's own proposals.
+    let extra = audio
+        .map(|a| candidate_spans(&transcript.words, a, cfg.min_clip_duration, cfg.max_clip_duration, cfg.top_n * 2))
+        .unwrap_or_default();
+    if !extra.is_empty() {
+        tracing::info!("{} audio-driven candidates (laughter/loudness peaks)", extra.len());
+    }
     let resp: ScoreClipsResp = client
-        .score_clips(&transcript.words, cfg)
+        .score_clips(&transcript.words, cfg, &extra)
         .await
         .context("Gemma clip scoring")?;
 
@@ -72,6 +86,19 @@ pub async fn score(cfg: &Config, client: &SidecarClient, transcript: &Transcript
             }
             c.word_end = Some(we);
             snap_to_sentences(&transcript.words, &mut c, cfg.min_clip_duration, cfg.max_clip_duration);
+            if let Some(a) = audio {
+                // Let a laugh land: a clip that cuts one off is extended past it.
+                if let Some(t) = extended_end(a, c.start, c.end, cfg.max_clip_duration) {
+                    c.end = t;
+                    c.word_end = transcript.words.iter().rposition(|w| w.start <= t).map(|i| i + 1);
+                }
+                // Blend the model's rubric score with the audio score.
+                let stats = a.stats(c.start, c.end);
+                let w = cfg.audio_weight.clamp(0.0, 1.0);
+                let text_score = c.score;
+                c.score = (1.0 - w) * text_score + w * stats.score();
+                c.rationale = format!("{} | audio {:.2} ({})", c.rationale, stats.score(), stats.describe());
+            }
             c
         })
         .collect();
@@ -120,13 +147,18 @@ const PAD_START_S: f64 = 0.15;
 const PAD_END_S: f64 = 0.30;
 
 /// True when a sentence ends right after word `i`.
-fn ends_sentence(words: &[Word], i: usize) -> bool {
+pub(crate) fn ends_sentence(words: &[Word], i: usize) -> bool {
     if i + 1 >= words.len() {
         return true;
     }
     let t = words[i].text.trim_end();
     t.ends_with(['.', '?', '!', '…', '。', '！', '？', '۔'])
         || words[i + 1].start - words[i].end >= SENTENCE_GAP_S
+}
+
+/// True when a sentence starts at word `i`.
+pub(crate) fn sentence_starts(words: &[Word], i: usize) -> bool {
+    i == 0 || ends_sentence(words, i - 1)
 }
 
 /// Move a candidate's edges onto sentence boundaries (within `SNAP_MAX_WORDS`),

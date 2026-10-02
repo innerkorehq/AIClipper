@@ -5,6 +5,7 @@ Endpoints (see src/sidecar/client.rs for the Rust shapes):
     POST /v1/score_clips   -> Gemma clip scoring
     POST /v1/content_edit  -> Gemma content-edit + shot list
     POST /v1/diarize       -> pyannote diarization of a WAV path
+    POST /v1/audio_events  -> laughter / applause / loudness-peak analysis of a WAV path
     POST /v1/shutdown      -> graceful exit (Rust runs this on teardown)
 """
 
@@ -15,7 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import asr, diarize, gemma
+from . import asr, audio_events, diarize, gemma
 
 FORCED_MODEL: str | None = None
 DIAR_MODEL: str | None = None
@@ -54,6 +55,8 @@ class Handler(BaseHTTPRequestHandler):
                 send(self, 200, self._content_edit())
             elif self.path == "/v1/diarize":
                 send(self, 200, self._diarize())
+            elif self.path == "/v1/audio_events":
+                send(self, 200, self._audio_events())
             elif self.path == "/v1/transcribe":
                 send(self, 200, self._transcribe())
             elif self.path == "/v1/shutdown":
@@ -97,8 +100,21 @@ class Handler(BaseHTTPRequestHandler):
             min_duration=float(body.get("min_duration", 5.0)),
             max_duration=float(body.get("max_duration", 90.0)),
             max_tokens=int(body.get("max_tokens", 4096)),
+            extra=body.get("extra_candidates") or None,
         )
         return {"candidates": candidates, "llm_output": llm_output, "prompt": full_prompt}
+
+    def _audio_events(self) -> dict:
+        body = read_body(self)
+        wav = body.get("audio")
+        if not wav:
+            raise ValueError("missing audio path")
+        return audio_events.analyze(
+            str(wav),
+            body.get("model") or None,
+            win=float(body.get("win", 3.0)),
+            hop=float(body.get("hop", 1.5)),
+        )
 
     def _content_edit(self) -> dict:
         body = read_body(self)

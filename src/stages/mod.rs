@@ -1,6 +1,7 @@
 //! Pipeline stages (PRD §5). Each stage is an async fn over shared structs,
 //! writing its output through the `ArtifactStore` so runs resume (PRD §9).
 
+pub mod audio_events;
 pub mod content_edit;
 pub mod export;
 pub mod ingest;

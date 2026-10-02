@@ -32,18 +32,22 @@ pub async fn rough_cut(
     let start = candidate.start;
     let dur = candidate.end - start;
 
+    // Frame-accurate cut. A stream copy (`-c copy`) can only start on a keyframe,
+    // which in long-GOP sources (YouTube VP9/H.264) is seconds before the clip
+    // start — the rough cut then no longer lines up with the transcript, the
+    // captions or the face/shot analysis, all of which assume t=0 is the clip
+    // start. Re-encoding decodes up to the exact frame instead.
     let mut cmd = Command::new(&cfg.ffmpeg);
     cmd.arg("-y")
         .arg("-ss")
-        .arg(start.to_string())
+        .arg(format!("{start:.3}"))
         .arg("-i")
         .arg(source.as_os_str())
         .arg("-t")
-        .arg(dur.to_string())
-        .arg("-c")
-        .arg("copy")
-        .arg("-avoid_negative_ts")
-        .arg("make_zero")
+        .arg(format!("{dur:.3}"))
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p"])
+        .args(["-c:a", "aac", "-b:a", "192k"])
+        .args(["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"])
         .arg(out.as_os_str());
 
     crate::util::run_ok(&mut cmd, &format!("ffmpeg rough cut #{index}"))

@@ -120,6 +120,15 @@ pub struct Config {
     pub top_n: usize,
     /// Candidates the rubric rates below this (0..1) are not worth rendering.
     pub min_clip_score: f64,
+    /// Analyse laughter/applause/loudness and use it for clip selection.
+    pub audio_events: bool,
+    /// HF audio-classification model (empty = sidecar default AST/AudioSet).
+    pub audio_model: String,
+    /// Weight (0..1) of the audio score in the final clip score.
+    pub audio_weight: f64,
+    /// Seconds captions are shown earlier than the ASR word times (ASR timestamps
+    /// run slightly late; measured ≈0.15s for the Hinglish model).
+    pub caption_lead_s: f64,
     /// Whether to skip active-speaker resolution (single speaker).
     pub assume_single_speaker: bool,
     pub llm_log_path: PathBuf,
@@ -173,6 +182,13 @@ impl Config {
             min_clip_duration: 5.0,
             top_n: 8,
             min_clip_score: env_f64("AICLIPPER_MIN_CLIP_SCORE", 0.3),
+            audio_events: env_bool("AICLIPPER_AUDIO_EVENTS", true),
+            audio_model: env("AICLIPPER_AUDIO_MODEL", ""),
+            audio_weight: env_f64("AICLIPPER_AUDIO_WEIGHT", 0.35),
+            caption_lead_s: env_f64(
+                "AICLIPPER_CAPTION_LEAD_S",
+                if env("AICLIPPER_WHISPER_BACKEND", "cpp") == "hf" { 0.15 } else { 0.0 },
+            ),
             assume_single_speaker: false,
             llm_log_path,
         }
