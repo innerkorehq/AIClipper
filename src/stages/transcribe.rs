@@ -86,7 +86,22 @@ pub async fn transcribe(cfg: &Config, source: &Path, client: &SidecarClient) -> 
             "transcribing with transformers model `{}` (Hinglish/word-level)",
             cfg.whisper_hf_model
         );
-        return client.transcribe_hf(&wav, &cfg.whisper_hf_model).await;
+        // Cache the raw model output (slow to produce) so cleanup rules can be
+        // re-applied without re-transcribing.
+        let slug: String = cfg.whisper_hf_model.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+        let raw_path = cfg.media_dir().join(format!("transcript_hf_{slug}.json"));
+        let raw_words: Vec<Word> = match std::fs::read(&raw_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            Some(w) => {
+                tracing::info!("reusing raw transcription {}", raw_path.display());
+                w
+            }
+            None => {
+                let t = client.transcribe_hf(&wav, &cfg.whisper_hf_model).await?;
+                std::fs::write(&raw_path, serde_json::to_vec(&t.words)?)?;
+                t.words
+            }
+        };
+        return Ok(Transcript { words: clean_words(raw_words)? });
     }
 
     let model = resolve_model(cfg)?;
@@ -191,9 +206,73 @@ fn has_char_run(text: &str, n: usize) -> bool {
     false
 }
 
+/// Drop non-speech and decoding artefacts from ASR output (any backend):
+/// special tokens, hallucinated long/looping words, zero-length timings.
+pub fn clean_words(mut raw: Vec<Word>) -> Result<Vec<Word>> {
+    spread_collapsed_timings(&mut raw);
+    let mut words = Vec::with_capacity(raw.len());
+    let mut dropped = 0usize;
+    for w in raw {
+        let text = w.text.trim().to_string();
+        if text.is_empty() || is_special_token(&text) {
+            continue;
+        }
+        if w.end - w.start > MAX_WORD_SECONDS || has_char_run(&text, MAX_CHAR_RUN) {
+            dropped += 1;
+            continue;
+        }
+        // Zero-length words would be dropped downstream; give them a sliver.
+        let end = if w.end > w.start { w.end } else { w.start + 0.1 };
+        words.push(Word { text, start: w.start, end });
+    }
+    let before = words.len();
+    drop_phrase_loops(&mut words);
+    dropped += before - words.len();
+    if dropped > 0 {
+        tracing::warn!("dropped {dropped} hallucinated words (over {MAX_WORD_SECONDS}s, repeated characters or phrase loops)");
+    }
+    if words.is_empty() {
+        anyhow::bail!("transcription produced no words — check source duration and model");
+    }
+    tracing::info!("transcript: {} words over {:.1}s", words.len(), words.last().unwrap().end);
+    Ok(words)
+}
+
+/// Some ASR backends emit runs of words with start == end. Spread each run
+/// evenly over the gap between its neighbours so words keep a usable duration
+/// and order (used for captions and clip-boundary snapping).
+fn spread_collapsed_timings(words: &mut [Word]) {
+    let n = words.len();
+    let mut i = 0;
+    while i < n {
+        if words[i].end > words[i].start {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < n && words[j].end <= words[j].start {
+            j += 1;
+        }
+        // run [i, j) collapsed; available span: previous word's end .. next word's start
+        let lo = if i > 0 { words[i - 1].end } else { words[i].start };
+        let hi = if j < n { words[j].start } else { lo + 0.3 * (j - i) as f64 };
+        if hi - lo >= 0.04 * (j - i) as f64 {
+            let step = (hi - lo) / (j - i) as f64;
+            for (k, w) in words[i..j].iter_mut().enumerate() {
+                w.start = lo + step * k as f64;
+                w.end = lo + step * (k + 1) as f64;
+            }
+        }
+        i = j;
+    }
+}
+
 /// A phrase (1–8 words) repeated back-to-back this many times is a decoding
 /// loop — whisper's habit on music/silence — not speech.
 const MIN_LOOP_REPEATS: usize = 3;
+/// A single word repeated is often real emphasis ("bolo bolo bolo"), so it
+/// takes more repeats to count as a loop.
+const MIN_LOOP_REPEATS_SINGLE: usize = 5;
 const MAX_LOOP_PHRASE: usize = 8;
 
 /// Remove every word that sits inside a phrase loop (all repetitions, since the
@@ -205,12 +284,13 @@ fn drop_phrase_loops(words: &mut Vec<Word>) {
     let mut in_loop = vec![false; n];
     for len in 1..=MAX_LOOP_PHRASE {
         let mut i = 0;
-        while i + len * MIN_LOOP_REPEATS <= n {
+        let min_reps = if len == 1 { MIN_LOOP_REPEATS_SINGLE } else { MIN_LOOP_REPEATS };
+        while i + len * min_reps <= n {
             let mut reps = 1;
             while i + (reps + 1) * len <= n && toks[i + reps * len..i + (reps + 1) * len] == toks[i..i + len] {
                 reps += 1;
             }
-            if reps >= MIN_LOOP_REPEATS && toks[i..i + len].iter().any(|t| !t.is_empty()) {
+            if reps >= min_reps && toks[i..i + len].iter().any(|t| !t.is_empty()) {
                 in_loop[i..i + reps * len].iter_mut().for_each(|f| *f = true);
                 i += reps * len;
             } else {
@@ -241,8 +321,7 @@ pub fn parse_whisper_json(path: &Path) -> Result<Transcript> {
         }
     }
 
-    let mut words = Vec::new();
-    let mut dropped = 0usize;
+    let mut raw_words = Vec::new();
     let mut i = 0;
     while i < segs.len() {
         let (start, mut end, mut bytes) = segs[i].clone();
@@ -255,29 +334,9 @@ pub fn parse_whisper_json(path: &Path) -> Result<Transcript> {
             end = segs[i].1;
         }
         i += 1;
-
-        let text = String::from_utf8_lossy(&bytes).trim().to_string();
-        if text.is_empty() || is_special_token(&text) {
-            continue;
-        }
-        if end - start > MAX_WORD_SECONDS || has_char_run(&text, MAX_CHAR_RUN) {
-            dropped += 1;
-            continue;
-        }
-        // Zero-length words would be dropped downstream; give them a sliver.
-        let end = if end > start { end } else { start + 0.1 };
-        words.push(Word { text, start, end });
+        raw_words.push(Word { text: String::from_utf8_lossy(&bytes).trim().to_string(), start, end });
     }
-    let before = words.len();
-    drop_phrase_loops(&mut words);
-    dropped += before - words.len();
-    if dropped > 0 {
-        tracing::warn!("dropped {dropped} hallucinated words (over {MAX_WORD_SECONDS}s, repeated characters or phrase loops)");
-    }
-    if words.is_empty() {
-        anyhow::bail!("whisper produced no words — check source duration and model");
-    }
-    tracing::info!("transcript: {} words over {:.1}s", words.len(), words.last().unwrap().end);
+    let words = clean_words(raw_words)?;
     Ok(Transcript { words })
 }
 
@@ -353,6 +412,10 @@ mod tests {
     #[test]
     fn drops_phrase_loops_but_keeps_normal_repeats() {
         let mk = |t: &str, i: usize| Word { text: t.into(), start: i as f64, end: i as f64 + 0.5 };
+        // natural single-word emphasis survives
+        let mut emph: Vec<Word> = ["bolo", "bolo", "bolo", "ok"].iter().enumerate().map(|(i, t)| mk(t, i)).collect();
+        drop_phrase_loops(&mut emph);
+        assert_eq!(emph.len(), 4);
         let mut v: Vec<Word> = ["so", "yeh", "capsule", "lita", "yeh", "capsule", "lita", "yeh", "capsule", "lita", "bye"]
             .iter()
             .enumerate()
@@ -365,5 +428,15 @@ mod tests {
         let mut ok: Vec<Word> = ["no", "no", "yes", "go", "yes", "go"].iter().enumerate().map(|(i, t)| mk(t, i)).collect();
         drop_phrase_loops(&mut ok);
         assert_eq!(ok.len(), 6);
+    }
+
+    #[test]
+    fn spreads_collapsed_timings() {
+        let w = |t: &str, s: f64, e: f64| Word { text: t.into(), start: s, end: e };
+        let mut v = vec![w("a", 0.0, 1.0), w("b", 1.0, 1.0), w("c", 1.0, 1.0), w("d", 2.0, 2.5)];
+        spread_collapsed_timings(&mut v);
+        assert_eq!((v[1].start, v[1].end), (1.0, 1.5));
+        assert_eq!((v[2].start, v[2].end), (1.5, 2.0));
+        assert_eq!(v[3].start, 2.0);
     }
 }

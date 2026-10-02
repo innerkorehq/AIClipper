@@ -172,7 +172,7 @@ impl Config {
             max_clip_duration: 90.0,
             min_clip_duration: 5.0,
             top_n: 8,
-            min_clip_score: env_f64("AICLIPPER_MIN_CLIP_SCORE", 0.5),
+            min_clip_score: env_f64("AICLIPPER_MIN_CLIP_SCORE", 0.3),
             assume_single_speaker: false,
             llm_log_path,
         }

@@ -32,6 +32,22 @@ pub async fn score(cfg: &Config, client: &SidecarClient, transcript: &Transcript
             // Resolve word indices into transcript time.
             c.word_start = transcript.words.iter().position(|w| w.end >= c.start);
             c.word_end = transcript.words.iter().rposition(|w| w.start <= c.end).map(|i| i + 1);
+            // Too long: end it on the last sentence boundary that fits, rather
+            // than discarding a good moment.
+            if c.end - c.start > cfg.max_clip_duration {
+                if let (Some(ws), Some(we0)) = (c.word_start, c.word_end) {
+                    let fits = |we: usize| transcript.words[we - 1].end - transcript.words[ws].start <= cfg.max_clip_duration;
+                    let best = (ws + 1..=we0.min(transcript.words.len()))
+                        .rev()
+                        .filter(|&we| fits(we))
+                        .find(|&we| ends_sentence(&transcript.words, we - 1))
+                        .or_else(|| (ws + 1..=we0.min(transcript.words.len())).rev().find(|&we| fits(we)));
+                    if let Some(we) = best {
+                        c.word_end = Some(we);
+                        c.end = transcript.words[we - 1].end;
+                    }
+                }
+            }
             // Small, quantized models (Gemma-4-MLX 4-bit) often choose spans
             // shorter than the minimum clip. Extend the end forward, word by
             // word, until it meets min_clip_duration — but never jump a >1s
