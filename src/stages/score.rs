@@ -36,7 +36,7 @@ pub async fn score(
     let mut candidates: Vec<ClipCandidate> = resp
         .candidates
         .into_iter()
-        .filter(|c| c.score >= cfg.min_clip_score && c.end > c.start)
+        .filter(|c| c.score > 0.0 && c.end > c.start)
         .map(|mut c| {
             if c.end > last_end + 0.5 {
                 c.end = last_end;
@@ -96,11 +96,14 @@ pub async fn score(
                 let stats = a.stats(c.start, c.end);
                 let w = cfg.audio_weight.clamp(0.0, 1.0);
                 let text_score = c.score;
-                c.score = (1.0 - w) * text_score + w * stats.score();
+                // Audio can only help: no laughter in a calm stretch is not evidence
+                // against the clip, so never score below the text rubric.
+                c.score = text_score.max((1.0 - w) * text_score + w * stats.score());
                 c.rationale = format!("{} | audio {:.2} ({})", c.rationale, stats.score(), stats.describe());
             }
             c
         })
+        .filter(|c| c.score >= cfg.min_clip_score)
         .collect();
 
     if candidates.is_empty() {
