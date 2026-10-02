@@ -14,7 +14,7 @@
 //! deterministic code computes" enforcement of crop geometry.
 
 use crate::config::Config;
-use crate::stages::shot_classify::ShotClassified;
+use crate::stages::shot_classify::{Layout, ShotClassified};
 use crate::stages::speaker::ShotSpeaker;
 use crate::types::{BBox, BBoxKeyframe, ShotSegment, ShotStrategy};
 
@@ -88,7 +88,7 @@ fn build_one(
 
     // Two-speaker tracking: if a second confident face persists through the
     // shot, the renderer stacks the second subject below the active speaker.
-    if shot.strategy == ShotStrategy::FaceCrop {
+    if shot.strategy == ShotStrategy::FaceCrop && shot.layout == Layout::Split {
         let dets2 = second_face_detections(shot, speaker);
         if !dets2.is_empty() {
             let mut kfs2 = keyframes_from_dets(cfg, shot, fps, clip_start, &dets2);

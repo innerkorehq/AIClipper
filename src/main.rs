@@ -214,6 +214,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
                     candidate.start,
                     fps_f,
                     &edit.shot_list,
+                    &roughs[idx].scene_cuts.iter().map(|t| candidate.start + t).collect::<Vec<_>>(),
                 )
                 .await?;
                 let speakers = stages::speaker::resolve(

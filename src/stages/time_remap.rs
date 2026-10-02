@@ -267,6 +267,8 @@ pub fn build_manifest(
 
     // ---- captions ----------------------------------------------------------
     let mut captions: Vec<Word> = Vec::new();
+    // Output time is clip-relative (0 at the candidate's first frame).
+    let clip_origin = remap.map(candidate_start).unwrap_or(candidate_start);
     for w in &transcript.words {
         if w.start < candidate_start - 0.01 || w.start >= candidate_end {
             continue;
@@ -275,6 +277,7 @@ pub fn build_manifest(
             continue;
         }
         if let (Some(s), Some(e)) = (remap.map(w.start), remap.map(w.end)) {
+            let (s, e) = (s - clip_origin, e - clip_origin);
             if e > s && s >= -0.001 {
                 captions.push(Word { text: w.text.clone(), start: s.max(0.0), end: e.max(0.0) });
             }
