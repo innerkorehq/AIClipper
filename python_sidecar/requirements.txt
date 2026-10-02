@@ -1,0 +1,9 @@
+# Gemma on Apple Silicon via MLX.
+mlx-lm>=0.21
+mlx>=0.20
+
+# Diarization (optional at runtime; configurable via HF_TOKEN).
+pyannote.audio>=3.1
+
+# pyannote's pipeline pulls a few extra bits.
+torch>=2.1
