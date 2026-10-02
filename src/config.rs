@@ -171,7 +171,7 @@ impl Config {
             silence_threshold_ms: 400,
             max_cut_fraction: 0.25,
             coalesce_gap_s: 0.35,
-            scene_threshold: 0.4,
+            scene_threshold: 0.25,
             face_confidence: 0.6,
             face_coverage: 0.5,
             framing_padding: 0.08,

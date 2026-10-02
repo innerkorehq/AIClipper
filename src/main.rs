@@ -158,7 +158,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
 
     // A changed range / cut mode invalidates every clip-level artifact (they are
     // keyed by candidate index only) and the per-frame detection cache.
-    let force_clip = cli.force || request_changed(&cfg, &cli)?;
+    let mut force_clip = cli.force || request_changed(&cfg, &cli)?;
 
     // ---- 5.2b audio events (laughter / applause / loudness peaks) -------------
     // Optional signal: any failure just means text-only clip selection.
@@ -184,8 +184,16 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         if found.is_empty() && matches!(fresh, Freshness::Reused) {
             // An empty cached result is a past failure, not an answer — rescore.
             tracing::info!("cached candidates were empty — rescoring");
-            run_stage(&store, "candidates", true, stages::score::score(&cfg, &sidecar, &transcript, audio.as_ref())).await?.0
+            let rescored =
+                run_stage(&store, "candidates", true, stages::score::score(&cfg, &sidecar, &transcript, audio.as_ref())).await?.0;
+            force_clip = true;
+            rescored
         } else {
+            // Rough cuts, edits, segments and manifests are keyed by candidate
+            // index, so a new candidate list invalidates all of them.
+            if matches!(fresh, Freshness::Computed) {
+                force_clip = true;
+            }
             found
         }
     };
@@ -447,9 +455,9 @@ fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> R
 /// this workdir. In that case stale per-clip artifacts and cached frame
 /// detections are cleared. Records the current request either way.
 fn request_changed(cfg: &Config, cli: &cli::Cli) -> Result<bool> {
-    // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut).
-    let current = format!("from={:?} to={:?} cuts={} rev=2", cli.range_from, cli.range_to, !cli.no_cuts);
-    let default = "from=None to=None cuts=true rev=2";
+    // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut; rev 3: working scene-cut detection).
+    let current = format!("from={:?} to={:?} cuts={} rev=3", cli.range_from, cli.range_to, !cli.no_cuts);
+    let default = "from=None to=None cuts=true rev=3";
     let path = cfg.stage_dir().join("request.txt");
     let previous = std::fs::read_to_string(&path).ok();
     let changed = match &previous {

@@ -107,6 +107,7 @@ pub async fn content_edit(
         })
         .collect::<Vec<_>>();
     shot_list.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    tile_shot_list(&mut shot_list, input.candidate.start, input.candidate.end);
     if shot_list.is_empty() {
         // Fallback: one shot covering the whole candidate (talking head default).
         shot_list.push(ShotListEntry {
@@ -124,6 +125,36 @@ pub async fn content_edit(
         shot_list,
         rationale: resp.rationale.clone(),
     })
+}
+
+/// Make the shot list cover [start, end] exactly: no gaps, no overlaps.
+///
+/// The model is asked for shots that cover the clip, but nothing guarantees it
+/// (especially once scene cuts are in the prompt). Any moment not covered by a
+/// shot renders as black frames, so geometry is enforced here, not trusted:
+/// a gap is absorbed by extending the earlier shot, an overlap is resolved in
+/// favour of the later shot, and the ends are stretched to the clip bounds.
+/// Shots that end up shorter than 50 ms are dropped.
+pub fn tile_shot_list(shots: &mut Vec<ShotListEntry>, start: f64, end: f64) {
+    shots.retain(|s| s.end > s.start);
+    if shots.is_empty() {
+        return;
+    }
+    shots.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    for i in 0..shots.len() - 1 {
+        let next_start = shots[i + 1].start;
+        shots[i].end = next_start; // closes a gap or trims an overlap
+    }
+    shots.first_mut().unwrap().start = start;
+    shots.last_mut().unwrap().end = end;
+    shots.retain(|s| s.end - s.start >= 0.05);
+    // dropping a sliver reopens a gap: re-close it
+    for i in 0..shots.len().saturating_sub(1) {
+        shots[i].end = shots[i + 1].start;
+    }
+    if let Some(l) = shots.last_mut() {
+        l.end = end;
+    }
 }
 
 /// Word-index span (global) covering [start, end] source time.
@@ -290,4 +321,47 @@ fn ordered_float(f: f64) -> std::cmp::Reverse<u64> {
 fn sort_and_validate(cuts: &mut Vec<CutRange>, _t: &Transcript) {
     cuts.sort_by_key(|c| c.start_word_idx);
     cuts.dedup_by_key(|c| (c.start_word_idx, c.end_word_idx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shot(start: f64, end: f64) -> ShotListEntry {
+        ShotListEntry { start, end, frame: ShotFrame::Speaker, target_track_id: None, reason: String::new() }
+    }
+
+    fn assert_tiles(v: &[ShotListEntry], start: f64, end: f64) {
+        assert_eq!(v.first().unwrap().start, start);
+        assert_eq!(v.last().unwrap().end, end);
+        for w in v.windows(2) {
+            assert_eq!(w[0].end, w[1].start, "gap or overlap between shots");
+        }
+    }
+
+    #[test]
+    fn closes_gaps_trims_overlaps_and_stretches_ends() {
+        // gap 2.6–4.1, overlap 6.0–6.4, ragged start/end
+        let mut v = vec![shot(1.0, 2.6), shot(4.1, 6.4), shot(6.0, 10.3), shot(10.3, 11.4)];
+        tile_shot_list(&mut v, 0.0, 12.0);
+        assert_tiles(&v, 0.0, 12.0);
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn single_and_unsorted_shots() {
+        let mut one = vec![shot(3.0, 4.0)];
+        tile_shot_list(&mut one, 0.0, 10.0);
+        assert_tiles(&one, 0.0, 10.0);
+        let mut un = vec![shot(5.0, 8.0), shot(0.0, 3.0)];
+        tile_shot_list(&mut un, 0.0, 9.0);
+        assert_tiles(&un, 0.0, 9.0);
+    }
+
+    #[test]
+    fn drops_slivers_without_reopening_gaps() {
+        let mut v = vec![shot(0.0, 3.0), shot(3.0, 3.02), shot(3.02, 6.0)];
+        tile_shot_list(&mut v, 0.0, 6.0);
+        assert_tiles(&v, 0.0, 6.0);
+    }
 }

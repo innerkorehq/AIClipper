@@ -82,8 +82,9 @@ async fn detect_scenes(cfg: &Config, input: &Path, threshold: f64) -> Result<Vec
             input.to_str().unwrap_or(""),
             "-vf",
             &vf,
-            "-vsync",
-            "vfr",
+            // NB: no `-vsync vfr` here — with current ffmpeg builds it makes the
+            // select/showinfo chain emit nothing, silently disabling cut detection.
+            "-an",
             "-f",
             "null",
             "-",

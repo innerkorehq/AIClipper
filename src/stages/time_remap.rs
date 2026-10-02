@@ -321,8 +321,13 @@ pub fn build_manifest(
             if end_frame <= start_frame {
                 continue;
             }
-            let src_start = candidate_rel(o).round().max(0.0) as u32;
-            let src_end = (candidate_rel(oe).round().max(0.0) as u32).max(src_start + 1);
+            // Where the piece sits on the OUTPUT timeline (clip-relative frames, cuts
+            // removed). The renderer places each shot's <Sequence> at these frames.
+            let src_start = ((out_s - clip_origin) * fps_f).round().max(0.0) as u32;
+            let src_end = (((out_e - clip_origin) * fps_f).round().max(0.0) as u32).max(src_start + 1);
+            // Where to start playing inside the rough-cut video: its own position,
+            // which differs from the output position once earlier material is cut.
+            let rough_trim = candidate_rel(o).round().max(0.0) as u32;
 
             // keyframes inside this piece, map their frame through remap
             let mut kfs: Vec<crate::types::BBoxKeyframe> = Vec::new();
@@ -364,7 +369,7 @@ pub fn build_manifest(
                 split: seg.split && !kfs2.is_empty(),
                 src_start_frame: src_start,
                 src_end_frame: src_end,
-                video_trim_frame: src_start,
+                video_trim_frame: rough_trim,
             });
         }
     }
@@ -373,6 +378,11 @@ pub fn build_manifest(
     let output_duration = remap.surviving_duration(candidate_start, candidate_end);
     if output_duration < 1.0 {
         anyhow::bail!("clip {clip_id} has no surviving material after edits");
+    }
+    let total_frames = (output_duration * fps_f).round() as u32;
+    let repaired = ensure_full_coverage(&mut shots, total_frames);
+    if repaired > 0 {
+        tracing::warn!("{clip_id}: shots left {repaired} output frames uncovered (would render black) — extended neighbouring shots");
     }
 
     Ok(RenderManifest {
@@ -391,4 +401,76 @@ pub fn build_manifest(
         cuts_s: remap.dropped_spans(),
         joins: remap.joins(),
     })
+}
+
+/// Make the shots (ordered by output position) cover output frames
+/// `0..total_frames` with no gaps. Any frame outside every shot renders black,
+/// so a gap is closed by extending the earlier shot (the video simply keeps
+/// playing), and a late first shot is pulled back to frame 0. Returns the
+/// number of frames that were uncovered.
+pub fn ensure_full_coverage(shots: &mut [ShotSegment], total_frames: u32) -> u32 {
+    shots.sort_by_key(|s| s.src_start_frame);
+    let mut repaired = 0u32;
+    if let Some(first) = shots.first_mut() {
+        let d = first.src_start_frame;
+        if d > 0 {
+            repaired += d;
+            first.src_start_frame = 0;
+            first.start_frame = first.start_frame.saturating_sub(d);
+            first.video_trim_frame = first.video_trim_frame.saturating_sub(d);
+        }
+    }
+    for i in 0..shots.len().saturating_sub(1) {
+        let next_start = shots[i + 1].src_start_frame;
+        if shots[i].src_end_frame < next_start {
+            repaired += next_start - shots[i].src_end_frame;
+        }
+        shots[i].src_end_frame = next_start;
+    }
+    if let Some(last) = shots.last_mut() {
+        if last.src_end_frame < total_frames {
+            repaired += total_frames - last.src_end_frame;
+            last.src_end_frame = total_frames;
+        }
+    }
+    repaired
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::types::ShotStrategy;
+
+    fn seg(a: u32, b: u32) -> ShotSegment {
+        ShotSegment {
+            start_frame: a + 1000,
+            end_frame: b + 1000,
+            strategy: ShotStrategy::FaceCrop,
+            keyframes: vec![],
+            second_keyframes: vec![],
+            split: false,
+            src_start_frame: a,
+            src_end_frame: b,
+            video_trim_frame: a,
+        }
+    }
+
+    #[test]
+    fn covers_start_gaps_and_end() {
+        let mut v = vec![seg(16, 40), seg(60, 100), seg(100, 120)];
+        let n = ensure_full_coverage(&mut v, 130);
+        assert_eq!(v[0].src_start_frame, 0);
+        assert_eq!(v[0].video_trim_frame, 0);
+        assert_eq!(v[0].start_frame, 1000); // keyframe origin moves with the start
+        assert_eq!(v[0].src_end_frame, v[1].src_start_frame);
+        assert_eq!(v[1].src_end_frame, v[2].src_start_frame);
+        assert_eq!(v.last().unwrap().src_end_frame, 130);
+        assert_eq!(n, 16 + 20 + 10);
+    }
+
+    #[test]
+    fn already_covered_is_untouched() {
+        let mut v = vec![seg(0, 50), seg(50, 100)];
+        assert_eq!(ensure_full_coverage(&mut v, 100), 0);
+    }
 }

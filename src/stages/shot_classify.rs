@@ -52,7 +52,7 @@ pub enum Layout {
 
 /// A second face only counts (two-actor layout) if its area is at least this
 /// fraction of the primary face — ignores background bystanders.
-const SECOND_FACE_MIN_RATIO: f32 = 0.35;
+pub const SECOND_FACE_MIN_RATIO: f32 = 0.35;
 /// Layout must hold at least this long (s) or it is absorbed by a neighbour —
 /// stops detector flicker from toggling layouts.
 const MIN_LAYOUT_DWELL_S: f64 = 1.5;

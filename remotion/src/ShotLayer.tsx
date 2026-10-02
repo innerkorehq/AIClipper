@@ -174,6 +174,113 @@ function maxWindowBox(
   };
 }
 
+type Actor = {face: BBoxKeyframe; subject: BBoxKeyframe};
+
+/**
+ * Crop windows for the two halves of a two-actor layout, solved TOGETHER so that
+ *   1. each window fully contains its own actor,
+ *   2. neither window shows any part of the other actor, and
+ *   3. the two windows never overlap each other (nobody appears in both halves).
+ * Other bystanders may appear in either window.
+ *
+ * Both windows share one scale (largest first, shrinking until feasible) and are
+ * placed as close to centred on their actor as the constraints allow. Actors are
+ * ordered by screen position, so the pair is consistent even if they cross. If
+ * the actors overlap so much that no valid pair exists, the frame is split at
+ * the midpoint between them (windows touch but never overlap).
+ */
+export function splitWindows(
+  top: Actor,
+  bottom: Actor,
+  srcW: number,
+  srcH: number,
+  canvasW: number,
+  canvasH: number,
+): {top: BBoxKeyframe; bottom: BBoxKeyframe} {
+  const target = canvasW / canvasH;
+  const w0 = Math.min(srcW, srcH * target);
+  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+  const m = srcW * 0.008; // margin at a cut
+  const g = srcW * 0.004; // minimum gap between the two windows
+
+  // "core" = the face widened a little (hair/shoulders), in source pixels
+  // (clamped inside the frame: an actor at the edge can't extend past it)
+  const coreL = (f: BBoxKeyframe) => clamp((f.x - 0.3 * f.w) * srcW, m, srcW - m);
+  const coreR = (f: BBoxKeyframe) => clamp((f.x + 1.3 * f.w) * srcW, m, srcW - m);
+  const topIsLeft = coreL(top.face) + coreR(top.face) <= coreL(bottom.face) + coreR(bottom.face);
+  const left = topIsLeft ? top : bottom;
+  const right = topIsLeft ? bottom : top;
+
+  const aL = coreL(left.face);
+  const aR = coreR(left.face);
+  const bL = coreL(right.face);
+  const bR = coreR(right.face);
+  const cxLeft = (left.subject.x + left.subject.w / 2) * srcW;
+  const cxRight = (right.subject.x + right.subject.w / 2) * srcW;
+
+  const make = (L: number, w: number, who: Actor): BBoxKeyframe => {
+    const h = w / target;
+    const cy = (who.subject.y + who.subject.h / 2) * srcH;
+    const t = clamp(cy - h / 2, 0, srcH - h);
+    return {frame: who.subject.frame, x: L / srcW, y: t / srcH, w: w / srcW, h: h / srcH};
+  };
+  const result = (l1: number, l2: number, w: number) => {
+    const lw = make(l1, w, left);
+    const rw = make(l2, w, right);
+    return topIsLeft ? {top: lw, bottom: rw} : {top: rw, bottom: lw};
+  };
+
+  for (let sc = 1; sc >= 0.15; sc -= 0.02) {
+    const w = w0 * sc;
+    const lo1 = Math.max(0, aR + m - w);
+    const hi1 = Math.min(srcW - w, aL - m, bL - m - w);
+    const lo2 = Math.max(0, bR + m - w, aR + m);
+    const hi2 = Math.min(srcW - w, bL - m);
+    if (lo1 > hi1 || lo2 > hi2) {
+      continue;
+    }
+    let l1 = clamp(cxLeft - w / 2, lo1, hi1);
+    let l2 = clamp(cxRight - w / 2, lo2, hi2);
+    const need = w + g;
+    if (l2 - l1 < need) {
+      // push the windows apart, symmetrically first, then use any slack left
+      const d = need - (l2 - l1);
+      l1 = clamp(l1 - d / 2, lo1, hi1);
+      l2 = clamp(l2 + d / 2, lo2, hi2);
+      let rem = need - (l2 - l1);
+      if (rem > 0) {
+        const n1 = clamp(l1 - rem, lo1, hi1);
+        rem -= l1 - n1;
+        l1 = n1;
+      }
+      if (rem > 0) {
+        l2 = clamp(l2 + rem, lo2, hi2);
+      }
+    }
+    if (l2 - l1 >= need - 0.5) {
+      return result(l1, l2, w);
+    }
+  }
+
+  // No equal-size pair fits (actors crowded together or against an edge): split
+  // the frame at the gap between them and size each window on its own. The
+  // windows still never overlap; each actor is contained as fully as room allows.
+  const X = aR < bL ? (aR + bL) / 2 : ((aL + aR) / 2 + (bL + bR) / 2) / 2;
+  const roomL = Math.min(w0, X);
+  const roomR = Math.min(w0, srcW - X);
+  const base = Math.min(roomL, roomR);
+  const needL = aR - aL + 2 * m;
+  const needR = bR - bL + 2 * m;
+  // (never wider than the room on its side of X — that is what keeps them disjoint)
+  const wl = Math.min(roomL, Math.max(1, clamp(base, Math.min(needL, roomL), roomL)));
+  const wr = Math.min(roomR, Math.max(1, clamp(base, Math.min(needR, roomR), roomR)));
+  const l1 = clamp(cxLeft - wl / 2, 0, Math.max(0, X - wl));
+  const l2 = clamp(cxRight - wr / 2, X, Math.max(X, srcW - wr));
+  const lw = make(l1, wl, left);
+  const rw = make(l2, wr, right);
+  return topIsLeft ? {top: lw, bottom: rw} : {top: rw, bottom: lw};
+}
+
 const Half: React.FC<{top: number; height: number; children: React.ReactNode}> = ({
   top,
   height,
@@ -243,6 +350,18 @@ export const ShotLayer: React.FC<{
   const canCropClean = subject !== null && maxWindow !== null;
   const split = secondSubject !== null && subject !== null;
 
+  // Two-actor layout: both crop windows are solved together (see splitWindows).
+  const splitWins = split
+    ? splitWindows(
+        {face: bbox, subject: subject!},
+        {face: secondBBox!, subject: secondSubject!},
+        sourceW,
+        sourceH,
+        width,
+        height / 2,
+      )
+    : null;
+
   // Background: blurred cover of the whole frame (fills letterbox edges).
   const BlurBack = (
     <Video
@@ -282,7 +401,7 @@ export const ShotLayer: React.FC<{
               endAt={endAt}
               volume={edgeFade}
               style={coverCrop(
-                maxWindowBox(subject!, sourceW, sourceH, width, height / 2),
+                splitWins!.top,
                 sourceW,
                 sourceH,
                 0,
@@ -299,7 +418,7 @@ export const ShotLayer: React.FC<{
               endAt={endAt}
               volume={0}
               style={coverCrop(
-                maxWindowBox(secondSubject!, sourceW, sourceH, width, height / 2),
+                splitWins!.bottom,
                 sourceW,
                 sourceH,
                 0,

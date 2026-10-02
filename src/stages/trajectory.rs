@@ -14,7 +14,7 @@
 //! deterministic code computes" enforcement of crop geometry.
 
 use crate::config::Config;
-use crate::stages::shot_classify::{Layout, ShotClassified};
+use crate::stages::shot_classify::{Layout, ShotClassified, SECOND_FACE_MIN_RATIO};
 use crate::stages::speaker::ShotSpeaker;
 use crate::types::{BBox, BBoxKeyframe, ShotSegment, ShotStrategy};
 
@@ -86,14 +86,18 @@ fn build_one(
 
     seg.keyframes = keyframes_from_dets(cfg, shot, fps, clip_start, &dets);
 
-    // Two-speaker tracking: if a second confident face persists through the
-    // shot, the renderer stacks the second subject below the active speaker.
+    // Two actors: each person gets a fixed half of the screen for the whole
+    // segment (left of frame → top, right → bottom). Slots follow the people,
+    // not the active speaker, so nobody jumps between halves mid-shot.
     if shot.strategy == ShotStrategy::FaceCrop && shot.layout == Layout::Split {
-        let dets2 = second_face_detections(shot, speaker);
-        if !dets2.is_empty() {
-            let mut kfs2 = keyframes_from_dets(cfg, shot, fps, clip_start, &dets2);
-            if kfs2.len() >= 2 {
+        let (top, bottom) = split_tracks(cfg, shot);
+        if top.len() >= 2 && bottom.len() >= 2 {
+            let mut kfs1 = keyframes_from_dets(cfg, shot, fps, clip_start, &top);
+            let mut kfs2 = keyframes_from_dets(cfg, shot, fps, clip_start, &bottom);
+            if kfs1.len() >= 2 && kfs2.len() >= 2 {
+                ensure_endpoints(&mut kfs1, shot.start, shot.end, fps, &shot.fallback_bbox);
                 ensure_endpoints(&mut kfs2, shot.start, shot.end, fps, &shot.fallback_bbox);
+                seg.keyframes = kfs1;
                 seg.second_keyframes = kfs2;
                 seg.split = true;
             }
@@ -146,55 +150,41 @@ fn keyframes_from_dets(
     kfs
 }
 
-/// The second subject of a talking-head shot: the largest confident face that
-/// is not the active speaker's box (falls back to the second-largest face).
-fn second_face_detections(shot: &ShotClassified, speaker: Option<&ShotSpeaker>) -> Vec<(f64, BBox)> {
-    let primary_at = |t: f64| -> Option<BBox> {
-        speaker.as_ref().and_then(|sp| {
-            sp.detections
-                .iter()
-                .min_by(|a, b| (a.0 - t).abs().partial_cmp(&(b.0 - t).abs()).unwrap())
-                .map(|(_, b)| *b)
-        })
+/// Two stable person tracks for a split shot: `(top, bottom)` detections.
+///
+/// Per sample the two largest confident faces are taken (the second must be at
+/// least `SECOND_FACE_MIN_RATIO` of the first's area). The first assignment puts
+/// the left person on top; afterwards each face keeps the slot whose previous
+/// position it is closest to, so the assignment never flips when people talk.
+fn split_tracks(cfg: &Config, shot: &ShotClassified) -> (Vec<(f64, BBox)>, Vec<(f64, BBox)>) {
+    let area = |b: &BBox| b.w * b.h;
+    let dist = |a: &BBox, c: (f32, f32)| {
+        let (cx, cy) = a.center();
+        (cx - c.0).abs() + (cy - c.1).abs()
     };
-
-    shot.samples
-        .iter()
-        .filter_map(|s| {
-            let mut faces: Vec<(BBox, f32)> = s
-                .faces
-                .iter()
-                .filter(|f| f.confidence >= 0.5)
-                .map(|f| (f.bbox, f.bbox.w * f.bbox.h))
-                .collect();
-            if faces.is_empty() {
-                return None;
+    let mut slots: Option<[(f32, f32); 2]> = None;
+    let (mut top, mut bottom) = (Vec::new(), Vec::new());
+    for s in &shot.samples {
+        let mut faces: Vec<BBox> =
+            s.faces.iter().filter(|f| f.confidence >= cfg.face_confidence).map(|f| f.bbox).collect();
+        faces.sort_by(|a, b| area(b).partial_cmp(&area(a)).unwrap_or(std::cmp::Ordering::Equal));
+        if faces.len() < 2 || area(&faces[1]) < SECOND_FACE_MIN_RATIO * area(&faces[0]) {
+            continue;
+        }
+        let (f0, f1) = (faces[0], faces[1]);
+        let (t, b) = match slots {
+            None => {
+                if f0.center().0 <= f1.center().0 { (f0, f1) } else { (f1, f0) }
             }
-            faces.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let primary_idx = primary_at(s.time).and_then(|pb| {
-                Some(
-                    faces
-                        .iter()
-                        .enumerate()
-                        .min_by(|(_, a), (_, b)| {
-                            let da = ((a.0.x + a.0.w / 2.0) - (pb.x + pb.w / 2.0)).abs()
-                                + ((a.0.y + a.0.h / 2.0) - (pb.y + pb.h / 2.0)).abs();
-                            let db = ((b.0.x + b.0.w / 2.0) - (pb.x + pb.w / 2.0)).abs()
-                                + ((b.0.y + b.0.h / 2.0) - (pb.y + pb.h / 2.0)).abs();
-                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(0),
-                )
-            })
-            .unwrap_or(0);
-            faces
-                .iter()
-                .enumerate()
-                .find(|(i, _)| *i != primary_idx)
-                .map(|(_, (b, _))| (s.time, *b))
-        })
-        .collect()
+            Some([st, sb]) => {
+                if dist(&f0, st) + dist(&f1, sb) <= dist(&f1, st) + dist(&f0, sb) { (f0, f1) } else { (f1, f0) }
+            }
+        };
+        slots = Some([t.center(), b.center()]);
+        top.push((s.time, t));
+        bottom.push((s.time, b));
+    }
+    (top, bottom)
 }
 
 fn face_detections(shot: &ShotClassified, speaker: Option<&ShotSpeaker>) -> Vec<(f64, BBox)> {
@@ -401,4 +391,62 @@ fn ensure_endpoints(kfs: &mut Vec<BBoxKeyframe>, shot_start: f64, shot_end: f64,
 
 fn to_frame(t: f64, fps: f64) -> u32 {
     (t.max(0.0) * fps).round() as u32
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    use crate::stages::shot_classify::ShotSample;
+    use crate::types::ShotFrame;
+    use crate::vision::FaceRect;
+
+    fn face(x: f32) -> FaceRect {
+        FaceRect { bbox: BBox { x, y: 0.3, w: 0.12, h: 0.2 }, confidence: 0.9 }
+    }
+
+    fn shot(per_sample: Vec<Vec<FaceRect>>) -> ShotClassified {
+        ShotClassified {
+            shot_list_idx: 0,
+            start: 0.0,
+            end: per_sample.len() as f64,
+            frame: ShotFrame::Speaker,
+            target_track_id: None,
+            strategy: ShotStrategy::FaceCrop,
+            layout: Layout::Split,
+            samples: per_sample
+                .into_iter()
+                .enumerate()
+                .map(|(i, faces)| ShotSample { time: i as f64, frame_idx: i as u32, faces, saliency: None })
+                .collect(),
+            fallback_bbox: BBox { x: 0.2, y: 0.2, w: 0.6, h: 0.6 },
+        }
+    }
+
+    #[test]
+    fn people_keep_their_half_regardless_of_who_is_larger() {
+        let cfg = Config::default_with_workdir(std::path::PathBuf::from("w"));
+        // left person ~x0.2, right person ~x0.7; detector order and relative size
+        // flip from sample to sample (as when the active speaker changes).
+        let mut a = face(0.2);
+        let mut b = face(0.7);
+        a.bbox.w = 0.15; // left larger
+        let s1 = vec![a, b];
+        b.bbox.w = 0.16; // right larger
+        let s2 = vec![b, face(0.2)];
+        let s3 = vec![face(0.21), b];
+        let (top, bottom) = split_tracks(&cfg, &shot(vec![s1, s2, s3.clone(), s3]));
+        assert_eq!(top.len(), 4);
+        assert!(top.iter().all(|(_, b)| b.x < 0.4), "top is always the left person");
+        assert!(bottom.iter().all(|(_, b)| b.x > 0.5), "bottom is always the right person");
+    }
+
+    #[test]
+    fn ignores_small_bystander_faces() {
+        let cfg = Config::default_with_workdir(std::path::PathBuf::from("w"));
+        let mut tiny = face(0.8);
+        tiny.bbox.w = 0.03;
+        tiny.bbox.h = 0.04;
+        let (top, _) = split_tracks(&cfg, &shot(vec![vec![face(0.2), tiny]]));
+        assert!(top.is_empty());
+    }
 }
