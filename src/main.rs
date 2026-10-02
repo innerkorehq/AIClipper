@@ -161,12 +161,21 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     let candidates: Vec<ClipCandidate> = if manual {
         vec![manual_candidate(&cli, &transcript, source.duration)?]
     } else {
-        run_stage(&store, "candidates", force_clip, stages::score::score(&cfg, &sidecar, &transcript)).await?.0
+        let (found, fresh) =
+            run_stage(&store, "candidates", force_clip, stages::score::score(&cfg, &sidecar, &transcript)).await?;
+        if found.is_empty() && matches!(fresh, Freshness::Reused) {
+            // An empty cached result is a past failure, not an answer — rescore.
+            tracing::info!("cached candidates were empty — rescoring");
+            run_stage(&store, "candidates", true, stages::score::score(&cfg, &sidecar, &transcript)).await?.0
+        } else {
+            found
+        }
     };
     tracing::info!("{} candidates to process", candidates.len());
 
     if candidates.is_empty() {
-        tracing::warn!("no candidates — check that the sidecar returned clips");
+        tracing::warn!("no clip candidates found — nothing to render (try --from/--to for an exact range)");
+        return Ok(());
     }
 
     let fps_u32 = (source.fps.round() as u32).max(1);
@@ -178,7 +187,19 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     let (turns, _): (Vec<SpeechTurn>, Freshness) = if cfg.assume_single_speaker || cli.single_speaker {
         (vec![], Freshness::Computed)
     } else {
-        run_stage(&store, "diarization", cli.force, stages::speaker::diarize_global(&sidecar, &wav)).await?
+        // Diarization needs a gated model + HF token. Without it, fall back to
+        // face-based speaker resolution instead of failing the whole run.
+        match run_stage(&store, "diarization", cli.force, stages::speaker::diarize_global(&sidecar, &wav)).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "diarization unavailable ({e:#}); continuing without it. \
+                     To enable: accept https://hf.co/pyannote/speaker-diarization-3.1 and set HF_TOKEN \
+                     (or pass --single-speaker to silence this)"
+                );
+                (vec![], Freshness::Computed)
+            }
+        }
     };
 
     let (vision, vision_ok) = vision::VisionService::new(&cfg);
@@ -309,7 +330,21 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     let mut ok_render = manifests.clone();
     ok_render.retain(|m| summary.rendered.contains(&m.clip_id));
 
-    let export_summary = stages::export::export_all(&cfg, &cli.profile, cli.profiles.clone()).await?;
+    // `--profiles` is either a JSON profile table or a comma-separated list of
+    // platform names (e.g. instagram_reels,tiktok,shorts).
+    let raw_profiles = cli.profiles.as_ref().map(|p| p.to_string_lossy().to_string());
+    let (table, names): (Option<PathBuf>, Vec<String>) = match raw_profiles {
+        Some(r) if std::path::Path::new(&r).is_file() => (Some(PathBuf::from(r)), vec![cli.profile.clone()]),
+        Some(r) => (None, r.split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()),
+        None => (None, vec![cli.profile.clone()]),
+    };
+    let multi = names.len() > 1;
+    let mut export_summary = stages::export::ExportSummary::default();
+    for name in &names {
+        let one = stages::export::export_all(&cfg, name, table.clone(), multi.then_some(name.as_str())).await?;
+        export_summary.exported.extend(one.exported);
+        export_summary.skipped.extend(one.skipped);
+    }
     tracing::info!(
         "export summary: {} exported, {} skipped",
         export_summary.exported.len(),

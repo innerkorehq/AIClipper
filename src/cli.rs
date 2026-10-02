@@ -23,7 +23,8 @@ pub struct Cli {
     #[arg(long, default_value = "work")]
     pub workdir: PathBuf,
 
-    /// Path to a JSON export-profile table (see `ExportProfile`).
+    /// Export platforms: a comma-separated list (instagram_reels,tiktok,shorts)
+    /// — one folder each under exports/ — or a path to a JSON profile table.
     #[arg(long)]
     pub profiles: Option<PathBuf>,
 

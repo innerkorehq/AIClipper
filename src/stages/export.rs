@@ -38,7 +38,12 @@ fn fallback_profile(name: &str) -> ExportProfile {
 
 /// Encode every rendered clip in `renders/out` into `exports/` under the
 /// given profile. Clips whose raw render is missing are listed as skipped.
-pub async fn export_all(cfg: &Config, profile_name: &str, profiles_opt: Option<PathBuf>) -> Result<ExportSummary> {
+pub async fn export_all(
+    cfg: &Config,
+    profile_name: &str,
+    profiles_opt: Option<PathBuf>,
+    out_subdir: Option<&str>,
+) -> Result<ExportSummary> {
     let profiles = ProfileTable::load(profiles_opt.as_deref())?;
     let profile = profiles
         .iter()
@@ -47,7 +52,11 @@ pub async fn export_all(cfg: &Config, profile_name: &str, profiles_opt: Option<P
         .unwrap_or_else(|| fallback_profile(profile_name));
 
     let rendered_dir = cfg.renders_dir().join("out");
-    let out_dir = cfg.exports_dir();
+    // Several platforms → one folder per platform so outputs don't collide.
+    let out_dir = match out_subdir {
+        Some(d) => cfg.exports_dir().join(d),
+        None => cfg.exports_dir(),
+    };
     std::fs::create_dir_all(&out_dir)?;
 
     let mut summary = ExportSummary::default();
