@@ -92,7 +92,7 @@ pub struct TranscribeResp {
 impl SidecarClient {
     pub fn new(cfg: &Config, base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(600))
+            .timeout(Duration::from_secs(3600)) // chunked clip scoring makes many LLM calls
             .connect_timeout(Duration::from_secs(5))
             .build()
             .expect("build sidecar http client");
@@ -130,7 +130,7 @@ impl SidecarClient {
         let body = json!({
             "transcript": { "words": words },
             "model": cfg.llm_model,
-            "max_clips": 32,
+            "max_clips": cfg.top_n,
             "min_duration": cfg.min_clip_duration,
             "max_duration": cfg.max_clip_duration,
             "max_tokens": cfg.llm_max_tokens,

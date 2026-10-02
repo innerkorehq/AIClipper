@@ -21,6 +21,9 @@ pub struct ContentEditInput<'a> {
     pub scene_cuts: Vec<f64>,
     /// Source-file offset of this candidate's start (add to scene-cut times).
     pub source_offset: f64,
+    /// When false the clip is kept continuous: no model cuts, no silence cuts,
+    /// and the shot list is a single covering shot.
+    pub allow_cuts: bool,
 }
 
 /// Run 5.5 for one candidate and enforce guardrails.
@@ -35,8 +38,23 @@ pub async fn content_edit(
 ) -> Result<ContentEdit> {
     let (slice_start_idx, slice_end_idx) = word_span(input.transcript, input.candidate.start, input.candidate.end);
     let slice = input.transcript.slice(slice_start_idx, slice_end_idx);
-    if slice.is_empty() {
-        anyhow::bail!("candidate #{} has empty transcript slice", input.candidate_idx);
+    // No cuts requested, or nothing was said (action footage): there is nothing
+    // for the model to edit. Layouts are decided per scene by the shot
+    // classifier, so a single covering shot is enough.
+    if !input.allow_cuts || slice.is_empty() {
+        let why = if !input.allow_cuts { "cuts disabled" } else { "no speech in clip" };
+        return Ok(ContentEdit {
+            candidate_idx: input.candidate_idx,
+            cut_ranges: Vec::new(),
+            shot_list: vec![ShotListEntry {
+                start: input.candidate.start,
+                end: input.candidate.end,
+                frame: ShotFrame::Speaker,
+                target_track_id: None,
+                reason: format!("continuous clip ({why})"),
+            }],
+            rationale: format!("Kept continuous: {why}."),
+        });
     }
 
     let mut scene_cuts_input = input

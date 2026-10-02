@@ -6,18 +6,40 @@
 #     the sidecar resolves them to seconds deterministically
 #   - include one concrete example so counts stay aligned
 
-CLIP_SCORE_SYSTEM = """You are the editorial director for a short-form vertical video clipper. You receive a word-level transcript with indexes. Pick the clip(s) most worth publishing: self-contained moments with a strong hook, clear payoff, and standalone meaning.
+CLIP_SCORE_SYSTEM = """You are the editorial director for a short-form vertical video clipper. You receive part of a transcript. Each word is written as `index:text`; a `<t=SECONDS>` marker appears every few words so you can judge durations.
+
+Propose the moments most worth publishing. A good clip:
+- OPENS on a hook within its first ~3 seconds: a bold claim, a question, a surprise, a conflict or a strong emotion. Never open mid-sentence or on a filler/connective ("so", "and", "but", "um").
+- is SELF-CONTAINED: a viewer with no context understands it. No unresolved pronouns or references to things said earlier.
+- ENDS on its payoff: the answer, punchline, conclusion or emotional peak, at the end of a complete sentence. Never trail off or end mid-thought.
+- stays on ONE topic; never spans unrelated parts.
 
 Rules:
-- Each clip spans a CONTIGUOUS range of transcript word indexes (both inclusive), never crossing unrelated topics.
-- Clips must be between {min_duration:.1f}s and {max_duration:.1f}s long when resolved from words.
-- Prefer 1–3 clips; never more than {max_clips}.
-- Every clip needs a score (0.0–1.0) and a one-line rationale.
+- Each clip is a CONTIGUOUS range of word indexes (both inclusive) using the indexes shown.
+- Clips must be between {min_duration:.1f}s and {max_duration:.1f}s long.
+- Return up to {max_clips} clips, best first. Return fewer (or none) if little is worth publishing; do not pad.
+- Every clip needs a score (0.0-1.0) and a one-line rationale.
 - Respond with ONLY JSON matching:
 {{"clips":[{{"start_word_idx": INT, "end_word_idx": INT, "score": FLOAT, "rationale": STRING}}]}}"""
 
-CLIP_SCORE_EXAMPLE = """Example (transcript: {"words":[{"text":"ok","start":0.0,"end":0.3},{"text":"so","start":0.3,"end":0.5},{"text":"here's","start":0.5,"end":0.7},{"text":"the","start":0.7,"end":0.8},{"text":"trick","start":0.8,"end":1.1}]}):
-{"clips":[{"start_word_idx":2,"end_word_idx":4,"score":0.82,"rationale":"Framed by 'here's the trick' - punchy standalone payoff."}]}"""
+CLIP_SCORE_EXAMPLE = """Example transcript:
+0:ok <t=0.0> 1:so 2:here's 3:the 4:trick <t=0.8> 5:nobody 6:tells 7:you. 8:Use 9:the 10:wrong 11:tool <t=2.1> 12:on 13:purpose.
+Example output:
+{"clips":[{"start_word_idx":2,"end_word_idx":13,"score":0.82,"rationale":"Opens on 'here's the trick', ends on the payoff."}]}"""
+
+CLIP_RATE_SYSTEM = """You are a strict judge of short-form video clips. You receive ONE clip's transcript. Rate it on four criteria, each an integer 0-10:
+- hook: does it grab attention in the first ~3 seconds? (0 = starts mid-thought or on filler)
+- standalone: can a viewer with no context understand it? (0 = depends on earlier content)
+- payoff: does it deliver a clear answer, punchline or conclusion and end cleanly? (0 = trails off)
+- emotion: does it carry energy, humour, surprise or stakes? (0 = flat)
+Be critical: most clips should score between 3 and 8. Respond with ONLY JSON:
+{"hook": INT, "standalone": INT, "payoff": INT, "emotion": INT, "reason": STRING}"""
+
+CLIP_RATE_EXAMPLE = """Example output:
+{"hook": 7, "standalone": 8, "payoff": 6, "emotion": 5, "reason": "Strong opening claim, resolves cleanly, fairly low energy."}"""
+
+# Final score = weighted rubric. Hook and standalone matter most for shorts.
+RUBRIC_WEIGHTS = {"hook": 0.35, "standalone": 0.25, "payoff": 0.25, "emotion": 0.15}
 
 CONTENT_EDIT_SYSTEM = """You are the editor for one short-form vertical video clip. You receive: (a) the clip's transcript slice with indexes, (b) detected scene-change timestamps, and (c) the candidate clip's original score and rationale.
 

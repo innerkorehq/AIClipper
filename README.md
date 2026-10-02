@@ -52,6 +52,23 @@ cargo run --release -- --url <URL> [--workdir work/run1]
 cargo run --release -- --file /path/video.mp4 [--profiles instagram_reels,tiktok,shorts]
 ```
 
+### Choosing the clip
+
+- **AI picks** (default): the transcript is split into overlapping windows, Gemma proposes
+  hook → payoff clips per window, then every merged candidate is rated on a fixed rubric
+  (hook 35%, standalone 25%, payoff 25%, emotion 15%). Clip edges are snapped to sentence
+  boundaries and lightly padded.
+- **Exact range**: `--from 1:30 --to 2:10` (seconds, `MM:SS` or `HH:MM:SS`) skips the AI picker and
+  clips exactly that range. `--from` alone runs to the end of the video. Works with no speech.
+- **`--no-cuts`**: keep the clip continuous — no filler/silence/tangent removal. Use for action
+  scenes. (Clips with no speech are always continuous.)
+
+```bash
+cargo run --release -- --file movie.mp4 --from 12:05 --to 12:40 --no-cuts
+```
+
+Changing the range or cut mode in an existing `--workdir` automatically recomputes the clip stages.
+
 Requires:
 - `yt-dlp`, `ffmpeg`, `whisper-cli` on PATH
 - Python sidecar deps: `python_sidecar/requirements.txt`

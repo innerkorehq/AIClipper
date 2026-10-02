@@ -91,26 +91,135 @@ def _extract_json(text: str) -> dict | list:
     raise ValueError("no JSON found in model output")
 
 
-def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: float, max_duration: float, max_tokens: int) -> tuple[list[dict], str, str]:
-    system = prompts.CLIP_SCORE_SYSTEM.format(
-        min_duration=min_duration, max_duration=max_duration, max_clips=max_clips
-    )
-    transcript = {"words": words}
+# ---- clip scoring: chunked proposals + rubric rating --------------------------
+
+WINDOW_WORDS = 450       # words per proposal window (keeps a small model sharp)
+WINDOW_OVERLAP = 90      # overlap so a clip on a seam is seen whole by one window
+MAX_RATED = 12           # cap on rubric-rated candidates (one LLM call each)
+MERGE_IOU = 0.5          # proposals overlapping more than this are duplicates
+
+
+def _format_words(words: list[dict], lo: int, hi: int) -> str:
+    """`idx:text` stream with a `<t=..>` marker every ~6 words (global indexes)."""
+    out = []
+    for i in range(lo, hi):
+        if (i - lo) % 6 == 0:
+            out.append(f"<t={words[i]['start']:.1f}>")
+        out.append(f"{i}:{words[i]['text']}")
+    return " ".join(out)
+
+
+def _windows(n: int) -> list[tuple[int, int]]:
+    if n <= WINDOW_WORDS:
+        return [(0, n)]
+    step = WINDOW_WORDS - WINDOW_OVERLAP
+    spans, lo = [], 0
+    while lo < n:
+        hi = min(n, lo + WINDOW_WORDS)
+        spans.append((lo, hi))
+        if hi >= n:
+            break
+        lo += step
+    return spans
+
+
+def _iou(a: dict, b: dict) -> float:
+    inter = max(0.0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
+    union = (a["end"] - a["start"]) + (b["end"] - b["start"]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def merge_proposals(cands: list[dict]) -> list[dict]:
+    """Drop duplicates (same moment proposed by overlapping windows), best first."""
+    kept: list[dict] = []
+    for c in sorted(cands, key=lambda c: c["score"], reverse=True):
+        if all(_iou(c, k) <= MERGE_IOU for k in kept):
+            kept.append(c)
+    return kept
+
+
+def rubric_score(r: dict) -> float | None:
+    """Weighted 0..1 score from a rubric response, or None if unusable."""
+    total = 0.0
+    for key, weight in prompts.RUBRIC_WEIGHTS.items():
+        try:
+            v = float(r[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+        total += weight * max(0.0, min(10.0, v)) / 10.0
+    return total
+
+
+def _rate(model_id: str, c: dict, words: list[dict], max_tokens: int) -> tuple[float, str, str]:
+    """Rate one candidate on the rubric. Falls back to the proposal score."""
+    text = " ".join(w["text"] for w in words[c["lo"]:c["hi"]])
     user = (
-        prompts.CLIP_SCORE_EXAMPLE
-        + "\n\nTranscript:\n"
-        + json.dumps(transcript)
-        + "\nOutput the JSON now."
+        prompts.CLIP_RATE_EXAMPLE
+        + f"\n\nClip ({c['end'] - c['start']:.1f}s):\n{text}\nOutput the JSON now."
     )
-    raw = _generate(model_id, system, user, max_tokens)
-    data = _extract_json(raw)
-    if not isinstance(data, dict) or "clips" not in data:
-        raise ValueError("score_clips: model output missing `clips`")
-    clips = data["clips"]
-    if not isinstance(clips, list):
-        raise ValueError("score_clips: `clips` is not a list")
-    candidates = [c for c in (prompts.resolve_clip_times(c, words) for c in clips) if c is not None]
-    return candidates, raw, system + "\n\n" + user
+    raw = _generate(model_id, prompts.CLIP_RATE_SYSTEM, user, min(max_tokens, 512))
+    try:
+        r = _extract_json(raw)
+        score = rubric_score(r) if isinstance(r, dict) else None
+        if score is None:
+            raise ValueError("incomplete rubric")
+        why = (
+            f"hook {r['hook']}/standalone {r['standalone']}/payoff {r['payoff']}/"
+            f"emotion {r['emotion']} - {r.get('reason', '')}"
+        )
+        return score, why, raw
+    except (ValueError, TypeError):
+        # unusable rating: keep the proposal, discounted so rated clips outrank it
+        return c["score"] * 0.8, c["rationale"] + " (unrated)", raw
+
+
+def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: float, max_duration: float, max_tokens: int) -> tuple[list[dict], str, str]:
+    """Two passes. (1) Propose clips per overlapping transcript window.
+    (2) Rate each merged candidate on a fixed rubric; the weighted rubric
+    (not the model's free-form number) is the final score."""
+    system = prompts.CLIP_SCORE_SYSTEM.format(
+        min_duration=min_duration, max_duration=max_duration, max_clips=min(max_clips, 5)
+    )
+    raws: list[str] = []
+    prompt_log: list[str] = [system]
+    proposals: list[dict] = []
+    for lo, hi in _windows(len(words)):
+        user = (
+            prompts.CLIP_SCORE_EXAMPLE
+            + "\n\nTranscript:\n"
+            + _format_words(words, lo, hi)
+            + "\nOutput the JSON now."
+        )
+        prompt_log.append(user)
+        raw = _generate(model_id, system, user, max_tokens)
+        raws.append(raw)
+        try:
+            data = _extract_json(raw)
+        except ValueError:
+            continue  # one bad window must not sink the whole run
+        clips = data.get("clips") if isinstance(data, dict) else None
+        if not isinstance(clips, list):
+            continue
+        for c in clips:
+            r = prompts.resolve_clip_times(c, words)
+            if r is None:
+                continue
+            # keep the word span so the rating pass can read the exact text
+            r["lo"] = int(round(float(c["start_word_idx"])))
+            r["hi"] = int(round(float(c["end_word_idx"]))) + 1
+            proposals.append(r)
+
+    if not proposals:
+        raise ValueError("score_clips: model proposed no valid clips")
+
+    merged = merge_proposals(proposals)[:MAX_RATED]
+    out = []
+    for c in merged:
+        score, why, raw = _rate(model_id, c, words, max_tokens)
+        raws.append(raw)
+        out.append({"start": c["start"], "end": c["end"], "score": score, "rationale": why})
+    out.sort(key=lambda c: c["score"], reverse=True)
+    return out, "\n---\n".join(raws), "\n\n".join(prompt_log)
 
 
 def content_edit(

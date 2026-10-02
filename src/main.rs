@@ -21,7 +21,7 @@ use crate::sidecar::SidecarClient;
 use crate::stages::ingest::{apply_source_to_state, ingest, SourceInfo};
 use crate::stages::time_remap::build_manifest;
 use crate::stages::trajectory::build_segments_for_clip;
-use crate::types::{ContentEdit, RunState, ShotSegment, SpeechTurn};
+use crate::types::{ClipCandidate, ContentEdit, RunState, ShotSegment, SpeechTurn, Transcript};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::future::Future;
@@ -137,13 +137,32 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     let (source, _): (SourceInfo, Freshness) =
         run_stage(&store, "ingest", cli.force, ingest(&cfg, input, cli.force)).await?;
 
-    // ---- 5.2 transcribe -----------------------------------------------------
-    let (transcript, _) =
-        run_stage(&store, "transcript", cli.force, stages::transcribe::transcribe(&cfg, &source.path, &sidecar)).await?;
+    let manual = cli.range_from.is_some() || cli.range_to.is_some();
 
-    // ---- 5.3 clip scoring (Gemma) ------------------------------------------
-    let (candidates, _) =
-        run_stage(&store, "candidates", cli.force, stages::score::score(&cfg, &sidecar, &transcript)).await?;
+    // ---- 5.2 transcribe -----------------------------------------------------
+    // For an explicit range the clip may have no speech at all (action
+    // footage), so a failed/empty transcription is not fatal there.
+    let (transcript, _) = run_stage(&store, "transcript", cli.force, async {
+        match stages::transcribe::transcribe(&cfg, &source.path, &sidecar).await {
+            Err(e) if manual => {
+                tracing::warn!("no usable transcript ({e:#}); continuing without speech");
+                Ok(Transcript { words: Vec::new() })
+            }
+            other => other,
+        }
+    })
+    .await?;
+
+    // A changed range / cut mode invalidates every clip-level artifact (they are
+    // keyed by candidate index only) and the per-frame detection cache.
+    let force_clip = cli.force || request_changed(&cfg, &cli)?;
+
+    // ---- 5.3 clip selection --------------------------------------------------
+    let candidates: Vec<ClipCandidate> = if manual {
+        vec![manual_candidate(&cli, &transcript, source.duration)?]
+    } else {
+        run_stage(&store, "candidates", force_clip, stages::score::score(&cfg, &sidecar, &transcript)).await?.0
+    };
     tracing::info!("{} candidates to process", candidates.len());
 
     if candidates.is_empty() {
@@ -174,7 +193,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         let (rough, _) = run_stage(
             &store,
             &rough_id(idx),
-            cli.force,
+            force_clip,
             stages::rough_cut::rough_cut(&cfg, &source.path, candidate, idx),
         )
         .await?;
@@ -184,7 +203,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         let (edit, _) = run_stage(
             &store,
             &edit_id(idx),
-            cli.force,
+            force_clip,
             stages::content_edit::content_edit(
                 &cfg,
                 &sidecar,
@@ -194,6 +213,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
                     transcript: &transcript,
                     scene_cuts: roughs[idx].scene_cuts.clone(),
                     source_offset: candidate.start,
+                    allow_cuts: !cli.no_cuts,
                 },
             ),
         )
@@ -205,7 +225,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         let (segments, _): (Vec<ShotSegment>, Freshness) = run_stage(
             &store,
             &segments_id(idx),
-            cli.force,
+            force_clip,
             async {
                 let classified = stages::shot_classify::classify_shots(
                     &cfg,
@@ -250,7 +270,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         let (m, _) = run_stage(
             &store,
             &manifests_id(idx),
-            cli.force,
+            force_clip,
             async {
                 build_manifest(
                     &format!("clip_{idx:03}"),
@@ -297,6 +317,49 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     );
     let _ = ok_render;
     Ok(())
+}
+
+/// Candidate for an explicit `--from/--to` range (skips the AI clip picker).
+fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> Result<ClipCandidate> {
+    let start = cli.range_from.unwrap_or(0.0);
+    let end = cli.range_to.unwrap_or(duration).min(duration);
+    if start >= duration {
+        anyhow::bail!("--from {start:.2}s is past the end of the source ({duration:.2}s)");
+    }
+    if end <= start {
+        anyhow::bail!("--to ({end:.2}s) must be after --from ({start:.2}s)");
+    }
+    let (ws, we) = stages::content_edit::word_span(transcript, start, end);
+    tracing::info!("manual range {start:.2}s–{end:.2}s ({:.1}s)", end - start);
+    Ok(ClipCandidate {
+        start,
+        end,
+        score: 1.0,
+        rationale: "manual range".into(),
+        word_start: Some(ws),
+        word_end: Some(we),
+    })
+}
+
+/// True when the clip request (range / cut mode) differs from the last run in
+/// this workdir. In that case stale per-clip artifacts and cached frame
+/// detections are cleared. Records the current request either way.
+fn request_changed(cfg: &Config, cli: &cli::Cli) -> Result<bool> {
+    let current = format!("from={:?} to={:?} cuts={}", cli.range_from, cli.range_to, !cli.no_cuts);
+    let default = "from=None to=None cuts=true";
+    let path = cfg.stage_dir().join("request.txt");
+    let previous = std::fs::read_to_string(&path).ok();
+    let changed = match &previous {
+        Some(p) => p.trim() != current,
+        None => current != default,
+    };
+    if changed {
+        tracing::info!("clip request changed ({current}) — recomputing clip stages");
+        let _ = std::fs::remove_dir_all(cfg.frames_dir());
+        std::fs::create_dir_all(cfg.frames_dir())?;
+    }
+    std::fs::write(&path, &current)?;
+    Ok(changed)
 }
 
 // ---- stage artifact ids ----------------------------------------------------
