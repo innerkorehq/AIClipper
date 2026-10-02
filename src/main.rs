@@ -133,6 +133,9 @@ async fn spawn_sidecar(cfg: &Config) -> Result<SidecarGuard> {
 
 /// Run every artifact-based stage in order.
 async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli: Cli, input: &str) -> Result<()> {
+    // Cached stage artifacts belong to one specific input; never mix inputs.
+    reset_if_new_input(&cfg, input)?;
+
     // ---- 5.1 ingest --------------------------------------------------------
     let (source, _): (SourceInfo, Freshness) =
         run_stage(&store, "ingest", cli.force, ingest(&cfg, input, cli.force)).await?;
@@ -351,6 +354,48 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         export_summary.skipped.len()
     );
     let _ = ok_render;
+    Ok(())
+}
+
+/// Identity of the input: the URL, or a local file's path + size + mtime.
+fn input_key(input: &str) -> String {
+    let p = std::path::Path::new(input);
+    match std::fs::metadata(p) {
+        Ok(m) if p.exists() => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let abs = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            format!("file:{}|{}|{}", abs.display(), m.len(), mtime)
+        }
+        _ => format!("url:{input}"),
+    }
+}
+
+/// If this workdir was last used for a different input, clear everything
+/// derived from the old one (stage artifacts, media, frame cache, renders).
+/// Finished exports are left alone. Records the current input either way.
+fn reset_if_new_input(cfg: &Config, input: &str) -> Result<()> {
+    let key = input_key(input);
+    let path = cfg.workdir.join("input.txt");
+    let previous = std::fs::read_to_string(&path).ok();
+    let has_old_work = cfg.stage_dir().join("ingest.json").exists();
+    let changed = match &previous {
+        Some(p) => p.trim() != key,
+        // legacy workdir with no record: its source is unknown, so don't trust it
+        None => has_old_work,
+    };
+    if changed {
+        tracing::warn!("input differs from the one this workdir was built from — clearing cached stages");
+        for dir in [cfg.stage_dir(), cfg.media_dir(), cfg.frames_dir(), cfg.renders_dir(), cfg.clips_dir()] {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        cfg.ensure_dirs()?;
+    }
+    std::fs::write(&path, &key)?;
     Ok(())
 }
 
