@@ -73,6 +73,8 @@ pub struct Config {
     pub whisper: String,
     pub whisper_model: String,
     pub whisper_threads: usize,
+    /// Spoken language for whisper.cpp (`auto`, `hi`, `en`, …).
+    pub whisper_lang: String,
     /// Transcription backend: `"cpp"` (whisper-cli/ggml) or `"hf"`
     /// (transformers via the sidecar — for Hinglish custom models).
     pub whisper_backend: String,
@@ -116,6 +118,8 @@ pub struct Config {
     pub min_clip_duration: f64,
     /// Number of top candidates to carry into rendering.
     pub top_n: usize,
+    /// Candidates the rubric rates below this (0..1) are not worth rendering.
+    pub min_clip_score: f64,
     /// Whether to skip active-speaker resolution (single speaker).
     pub assume_single_speaker: bool,
     pub llm_log_path: PathBuf,
@@ -135,6 +139,7 @@ impl Config {
                 "ggml-small.bin",
             ),
             whisper_threads: env_usize("AICLIPPER_WHISPER_THREADS", 4),
+            whisper_lang: env("AICLIPPER_WHISPER_LANG", "auto"),
             whisper_backend: env("AICLIPPER_WHISPER_BACKEND", "cpp"),
             whisper_hf_model: env(
                 "AICLIPPER_WHISPER_HF_MODEL",
@@ -167,6 +172,7 @@ impl Config {
             max_clip_duration: 90.0,
             min_clip_duration: 5.0,
             top_n: 8,
+            min_clip_score: env_f64("AICLIPPER_MIN_CLIP_SCORE", 0.5),
             assume_single_speaker: false,
             llm_log_path,
         }
@@ -253,6 +259,9 @@ fn env_bool(key: &str, default: bool) -> bool {
     }
 }
 fn env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+fn env_f64(key: &str, default: f64) -> f64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 fn env_usize(key: &str, default: usize) -> usize {

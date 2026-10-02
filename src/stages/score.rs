@@ -22,7 +22,7 @@ pub async fn score(cfg: &Config, client: &SidecarClient, transcript: &Transcript
     let mut candidates: Vec<ClipCandidate> = resp
         .candidates
         .into_iter()
-        .filter(|c| c.score > 0.0 && c.end > c.start)
+        .filter(|c| c.score >= cfg.min_clip_score && c.end > c.start)
         .map(|mut c| {
             if c.end > last_end + 0.5 {
                 c.end = last_end;
@@ -60,6 +60,13 @@ pub async fn score(cfg: &Config, client: &SidecarClient, transcript: &Transcript
         })
         .collect();
 
+    if candidates.is_empty() {
+        tracing::warn!(
+            "no clip rated at least {:.2} — the transcript may be too poor to judge (try a larger whisper model); \
+             lower AICLIPPER_MIN_CLIP_SCORE or use --from/--to to override",
+            cfg.min_clip_score
+        );
+    }
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
     let within = |c: &ClipCandidate| {
