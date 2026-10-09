@@ -67,6 +67,19 @@ cargo run --release -- --file /path/video.mp4 [--profiles instagram_reels,tiktok
 cargo run --release -- --file movie.mp4 --from 12:05 --to 12:40 --no-cuts
 ```
 
+### Transcript source
+
+If the video comes with subtitles they are the transcript, and speech recognition is skipped:
+a `.srt`/`.vtt` next to a local file (`movie.srt`, `movie.hi.srt`), an embedded text track, or the
+uploader's own subtitles fetched by yt-dlp for a URL. Auto-generated captions are never used —
+they are just another ASR. Subtitle cues are phrase-level, so words get timings spread across each
+cue by length. Language preference: `AICLIPPER_SUB_LANGS` (default `hi,en`). A subtitle track that
+looks too sparse to be a transcript falls back to ASR.
+
+- `--subtitles FILE` use this subtitle file
+- `--no-subtitles` ignore subtitles and transcribe the audio
+- `AICLIPPER_SUBTITLES=0` turn the feature off
+
 Changing the range or cut mode in an existing `--workdir` automatically recomputes the clip stages.
 
 Requires:

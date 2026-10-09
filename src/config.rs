@@ -121,6 +121,10 @@ pub struct Config {
     /// Candidates the rubric rates below this (0..1) are not worth rendering.
     pub min_clip_score: f64,
     /// Analyse laughter/applause/loudness and use it for clip selection.
+    /// Use the source's own subtitles as the transcript when available.
+    pub use_subtitles: bool,
+    /// Subtitle language preference, comma separated (e.g. `hi,en`).
+    pub sub_langs: String,
     pub audio_events: bool,
     /// HF audio-classification model (empty = sidecar default AST/AudioSet).
     pub audio_model: String,
@@ -182,6 +186,8 @@ impl Config {
             min_clip_duration: 5.0,
             top_n: 8,
             min_clip_score: env_f64("AICLIPPER_MIN_CLIP_SCORE", 0.3),
+            use_subtitles: env_bool("AICLIPPER_SUBTITLES", true),
+            sub_langs: env("AICLIPPER_SUB_LANGS", "hi,en"),
             audio_events: env_bool("AICLIPPER_AUDIO_EVENTS", true),
             audio_model: env("AICLIPPER_AUDIO_MODEL", ""),
             audio_weight: env_f64("AICLIPPER_AUDIO_WEIGHT", 0.35),

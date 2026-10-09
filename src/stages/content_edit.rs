@@ -65,10 +65,26 @@ pub async fn content_edit(
         .collect::<Vec<_>>();
     scene_cuts_input.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let resp: ContentEditResp = client
+    // A model hiccup (no parseable JSON, even after the sidecar's retry) must not
+    // abort the run: fall back to the deterministic edit — silence trimming plus a
+    // covering shot list — exactly as if the model had asked for nothing.
+    let resp: ContentEditResp = match client
         .content_edit(input.candidate, slice, &scene_cuts_input, cfg)
         .await
-        .with_context(|| format!("Gemma content-edit for candidate #{}", input.candidate_idx))?;
+        .with_context(|| format!("Gemma content-edit for candidate #{}", input.candidate_idx))
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("{e:#} — using the deterministic edit (silence trimming only) for this clip");
+            ContentEditResp {
+                cut_ranges: Vec::new(),
+                shot_list: Vec::new(),
+                rationale: "Model edit unavailable; applied deterministic silence trimming only.".into(),
+                llm_output: String::new(),
+                prompt: String::new(),
+            }
+        }
+    };
 
     // ---- rebase + validate model cut ranges -------------------------------
     let mut cut_ranges = rebase_cut_ranges(&resp.cut_ranges, slice_start_idx, slice.len())?;

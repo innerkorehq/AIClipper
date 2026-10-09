@@ -9,6 +9,7 @@ pub mod render;
 pub mod rough_cut;
 pub mod score;
 pub mod shot_classify;
+pub mod subtitles;
 pub mod speaker;
 pub mod time_remap;
 pub mod trajectory;

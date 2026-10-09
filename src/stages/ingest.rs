@@ -56,6 +56,19 @@ pub async fn ingest(cfg: &Config, input: &str, force: bool) -> Result<SourceInfo
         "--no-playlist",
     ])
     .arg(input);
+    if cfg.use_subtitles {
+        // The uploader's own subtitles only (never auto-generated captions, which are
+        // just someone else's ASR). A video without any simply downloads without them.
+        let langs = cfg
+            .sub_langs
+            .split(',')
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("{l}.*"))
+            .collect::<Vec<_>>()
+            .join(",");
+        cmd.args(["--write-subs", "--sub-langs", &langs, "--convert-subs", "srt"]);
+    }
     if force || !dst.exists() {
         util::run_ok(&mut cmd, "yt-dlp").await
             .with_context(|| format!("downloading {input}. Is yt-dlp installed?"))?;

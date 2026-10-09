@@ -140,25 +140,67 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     let (source, _): (SourceInfo, Freshness) =
         run_stage(&store, "ingest", cli.force, ingest(&cfg, input, cli.force)).await?;
 
-    let manual = cli.range_from.is_some() || cli.range_to.is_some();
-
-    // ---- 5.2 transcribe -----------------------------------------------------
-    // For an explicit range the clip may have no speech at all (action
-    // footage), so a failed/empty transcription is not fatal there.
-    let (transcript, _) = run_stage(&store, "transcript", cli.force, async {
-        match stages::transcribe::transcribe(&cfg, &source.path, &sidecar).await {
-            Err(e) if manual => {
-                tracing::warn!("no usable transcript ({e:#}); continuing without speech");
-                Ok(Transcript { words: Vec::new() })
-            }
-            other => other,
+    // ---- 5.2 transcript: the source's own subtitles beat ASR ------------------
+    // Subtitles shipped with the video (sidecar file, embedded track, or the
+    // uploader's subtitles fetched by yt-dlp) were written or checked by a
+    // person, and skip transcription entirely.
+    let explicit_subs = cli.subtitles.as_deref();
+    let subs_words: Option<(std::path::PathBuf, Vec<types::Word>)> = if cfg.use_subtitles && !cli.no_subtitles {
+        match stages::subtitles::locate(&cfg, input, &source.path, explicit_subs).await {
+            Some(path) => match stages::subtitles::transcript_from_file(&path) {
+                // an explicitly named file is used as given; a discovered one must look like a transcript
+                Ok(w) if !w.is_empty() && (explicit_subs.is_some() || stages::subtitles::is_usable(&w, source.duration)) => {
+                    tracing::info!("using subtitles {} as the transcript ({} words) — skipping speech recognition", path.display(), w.len());
+                    Some((path, w))
+                }
+                Ok(w) => {
+                    tracing::warn!("subtitles {} look incomplete ({} words for {:.0}s) — transcribing the audio instead", path.display(), w.len(), source.duration);
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("could not read subtitles {} ({e:#}) — transcribing the audio instead", path.display());
+                    None
+                }
+            },
+            None => None,
         }
-    })
-    .await?;
+    } else {
+        None
+    };
+    let transcript_source = match &subs_words {
+        Some((p, _)) => {
+            let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            format!("subs:{}:{len}", p.display())
+        }
+        None => "asr".to_string(),
+    };
+
+    // 16 kHz mono audio is needed by audio analysis and diarization either way.
+    let wav = cfg.media_dir().join("source.wav");
+    stages::transcribe::extract_wav(&cfg, &source.path, &wav).await?;
+
+    let manual = cli.range_from.is_some() || cli.range_to.is_some();
+    let transcript = if let Some((_, words)) = subs_words {
+        Transcript { words }
+    } else {
+        // For an explicit range the clip may have no speech at all (action
+        // footage), so a failed/empty transcription is not fatal there.
+        run_stage(&store, "transcript", cli.force, async {
+            match stages::transcribe::transcribe(&cfg, &source.path, &sidecar).await {
+                Err(e) if manual => {
+                    tracing::warn!("no usable transcript ({e:#}); continuing without speech");
+                    Ok(Transcript { words: Vec::new() })
+                }
+                other => other,
+            }
+        })
+        .await?
+        .0
+    };
 
     // A changed range / cut mode invalidates every clip-level artifact (they are
     // keyed by candidate index only) and the per-frame detection cache.
-    let mut force_clip = cli.force || request_changed(&cfg, &cli)?;
+    let mut force_clip = cli.force || request_changed(&cfg, &cli, &transcript_source)?;
 
     // ---- 5.2b audio events (laughter / applause / loudness peaks) -------------
     // Optional signal: any failure just means text-only clip selection.
@@ -335,7 +377,9 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
                     TARGET_HEIGHT,
                 )?;
                 // Show captions slightly ahead of the ASR word times (clamped at 0).
-                let lead = cfg.caption_lead_s;
+                // The lead compensates ASR timestamps running late; subtitle timings are
+                // human-set and need no such correction.
+                let lead = if transcript_source == "asr" { cfg.caption_lead_s } else { 0.0 };
                 for w in &mut manifest.captions {
                     w.start = (w.start - lead).max(0.0);
                     w.end = (w.end - lead).max(w.start + 0.05);
@@ -454,10 +498,12 @@ fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> R
 /// True when the clip request (range / cut mode) differs from the last run in
 /// this workdir. In that case stale per-clip artifacts and cached frame
 /// detections are cleared. Records the current request either way.
-fn request_changed(cfg: &Config, cli: &cli::Cli) -> Result<bool> {
+fn request_changed(cfg: &Config, cli: &cli::Cli, transcript_source: &str) -> Result<bool> {
     // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut; rev 3: working scene-cut detection; rev 4: short-GOP rough cut).
-    let current = format!("from={:?} to={:?} cuts={} rev=4", cli.range_from, cli.range_to, !cli.no_cuts);
-    let default = "from=None to=None cuts=true rev=4";
+    // The transcript's origin matters too: switching ASR <-> subtitles (or to a
+    // different subtitle file) changes every word the later stages see.
+    let current = format!("from={:?} to={:?} cuts={} rev=4 transcript={transcript_source}", cli.range_from, cli.range_to, !cli.no_cuts);
+    let default = "from=None to=None cuts=true rev=4 transcript=asr";
     let path = cfg.stage_dir().join("request.txt");
     let previous = std::fs::read_to_string(&path).ok();
     let changed = match &previous {

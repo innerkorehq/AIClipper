@@ -179,6 +179,33 @@ def _rate(model_id: str, c: dict, words: list[dict], max_tokens: int) -> tuple[f
         return c["score"] * 0.8, c["rationale"] + " (unrated)", raw
 
 
+def _generate_json(model_id: str, system: str, user: str, max_tokens: int, attempts: int = 2):
+    """Generate and parse a JSON reply, retrying once when the model fails to
+    produce one (reasoning that never closes, prose instead of JSON, truncation).
+    The retry names the problem and doubles the token budget (capped).
+    Returns (parsed, raw_of_last_attempt)."""
+    last = ""
+    for i in range(attempts):
+        u = user
+        budget = max_tokens
+        if i > 0:
+            u = (
+                user
+                + "\n\nYour previous reply was not valid JSON (it began: "
+                + json.dumps(last.strip()[:240])
+                + "). Reply again with ONLY the JSON object - no reasoning, no explanation, no markdown."
+            )
+            budget = min(max_tokens * 2, 8192)
+        last = _generate(model_id, system, u, budget)
+        try:
+            return _extract_json(last), last
+        except ValueError:
+            continue
+    raise ValueError(
+        f"no JSON found in model output after {attempts} attempts; last output began: {last.strip()[:200]!r}"
+    )
+
+
 def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: float, max_duration: float, max_tokens: int, extra: list[dict] | None = None) -> tuple[list[dict], str, str]:
     """Two passes. (1) Propose clips per overlapping transcript window.
     (2) Rate each merged candidate on a fixed rubric; the weighted rubric
@@ -261,8 +288,7 @@ def content_edit(
         + json.dumps(payload)
         + "\nOutput the JSON now."
     )
-    raw = _generate(model_id, system, user, max_tokens)
-    data = _extract_json(raw)
+    data, raw = _generate_json(model_id, system, user, max_tokens)
     if not isinstance(data, dict):
         raise ValueError("content_edit: model output is not an object")
     if "cut_ranges" not in data or "shot_list" not in data:

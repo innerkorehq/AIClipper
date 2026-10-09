@@ -58,6 +58,15 @@ pub struct Cli {
     #[arg(long = "to", value_name = "TIME", value_parser = parse_time)]
     pub range_to: Option<f64>,
 
+    /// Subtitle file (.srt/.vtt) to use as the transcript instead of ASR.
+    /// By default subtitles shipped with the video are found automatically.
+    #[arg(long, value_name = "FILE")]
+    pub subtitles: Option<PathBuf>,
+
+    /// Ignore any subtitles and transcribe the audio.
+    #[arg(long)]
+    pub no_subtitles: bool,
+
     /// Keep the clip continuous: do not cut filler, silences or tangents.
     /// Use for action scenes / footage without speech.
     #[arg(long)]
