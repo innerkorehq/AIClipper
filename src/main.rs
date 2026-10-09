@@ -140,6 +140,19 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     let (source, _): (SourceInfo, Freshness) =
         run_stage(&store, "ingest", cli.force, ingest(&cfg, input, cli.force)).await?;
 
+    // ---- clip requests (--ask / --brief): validated before any slow work ---------
+    let requests = stages::requests::load(&cli.ask, cli.brief.as_deref(), source.duration)?;
+    if !requests.is_empty() {
+        if cli.range_from.is_some() || cli.range_to.is_some() {
+            anyhow::bail!("--ask/--brief and --from/--to cannot be combined: requests search for clips, --from/--to names one exactly (put a time window in the request instead)");
+        }
+        tracing::info!("clip requests ({}):", requests.len());
+        for r in &requests {
+            tracing::info!("  {}", r.describe());
+        }
+    }
+    let requests_fp = stages::requests::fingerprint(&requests);
+
     // ---- 5.2 transcript: the source's own subtitles beat ASR ------------------
     // Subtitles shipped with the video (sidecar file, embedded track, or the
     // uploader's subtitles fetched by yt-dlp) were written or checked by a
@@ -200,7 +213,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
 
     // A changed range / cut mode invalidates every clip-level artifact (they are
     // keyed by candidate index only) and the per-frame detection cache.
-    let mut force_clip = cli.force || request_changed(&cfg, &cli, &transcript_source)?;
+    let mut force_clip = cli.force || request_changed(&cfg, &cli, &transcript_source, &requests_fp)?;
 
     // ---- 5.2b audio events (laughter / applause / loudness peaks) -------------
     // Optional signal: any failure just means text-only clip selection.
@@ -218,8 +231,24 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     };
 
     // ---- 5.3 clip selection --------------------------------------------------
+    let mut request_best: Vec<f64> = Vec::new();
     let candidates: Vec<ClipCandidate> = if manual {
         vec![manual_candidate(&cli, &transcript, source.duration)?]
+    } else if !requests.is_empty() {
+        // An empty result is a legitimate answer here ("nothing matched"), unlike
+        // the automatic picker where it means the model failed.
+        let ((found, best), fresh) = run_stage(
+            &store,
+            "requested_clips",
+            force_clip,
+            stages::score::select_for_requests(&cfg, &sidecar, &transcript, audio.as_ref(), &requests, !cli.no_cuts),
+        )
+        .await?;
+        if matches!(fresh, Freshness::Computed) {
+            force_clip = true; // artifacts downstream are keyed by candidate index
+        }
+        request_best = best;
+        found
     } else {
         let (found, fresh) =
             run_stage(&store, "candidates", force_clip, stages::score::score(&cfg, &sidecar, &transcript, audio.as_ref())).await?;
@@ -241,8 +270,19 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
     };
     tracing::info!("{} candidates to process", candidates.len());
 
+    if !requests.is_empty() {
+        let report = stages::requests::write_report(&cfg.workdir, &requests, &candidates, &request_best, cfg.min_relevance, &transcript)?;
+        tracing::info!("wrote {}/clips_report.md", cfg.workdir.display());
+        for line in report.lines().filter(|l| l.starts_with("## ") || l.starts_with("**No match")) {
+            tracing::info!("  {line}");
+        }
+    }
     if candidates.is_empty() {
-        tracing::warn!("no clip candidates found — nothing to render (try --from/--to for an exact range)");
+        if requests.is_empty() {
+            tracing::warn!("no clip candidates found — nothing to render (try --from/--to for an exact range)");
+        } else {
+            tracing::warn!("none of the requests matched anything well enough — see {}/clips_report.md", cfg.workdir.display());
+        }
         return Ok(());
     }
 
@@ -302,7 +342,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
                     transcript: &transcript,
                     scene_cuts: roughs[idx].scene_cuts.clone(),
                     source_offset: candidate.start,
-                    allow_cuts: !cli.no_cuts,
+                    allow_cuts: !cli.no_cuts && candidate.no_cuts != Some(true),
                 },
             ),
         )
@@ -362,7 +402,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
             force_clip,
             async {
                 let mut manifest = build_manifest(
-                    &format!("clip_{idx:03}"),
+                    &clip_name(idx, candidate, &requests),
                     candidate.start,
                     candidate.end,
                     fps_u32,
@@ -473,6 +513,15 @@ fn reset_if_new_input(cfg: &Config, input: &str) -> Result<()> {
     Ok(())
 }
 
+/// Output name for a clip: `clip_007`, or `clip_007_poster-joke` when it was
+/// requested (the label comes from the ask).
+fn clip_name(idx: usize, cand: &ClipCandidate, requests: &[stages::requests::ClipRequest]) -> String {
+    match cand.request_id.and_then(|id| requests.get(id)) {
+        Some(r) => format!("clip_{idx:03}_{}", r.label),
+        None => format!("clip_{idx:03}"),
+    }
+}
+
 /// Candidate for an explicit `--from/--to` range (skips the AI clip picker).
 fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> Result<ClipCandidate> {
     let start = cli.range_from.unwrap_or(0.0);
@@ -492,18 +541,19 @@ fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> R
         rationale: "manual range".into(),
         word_start: Some(ws),
         word_end: Some(we),
+        ..Default::default()
     })
 }
 
 /// True when the clip request (range / cut mode) differs from the last run in
 /// this workdir. In that case stale per-clip artifacts and cached frame
 /// detections are cleared. Records the current request either way.
-fn request_changed(cfg: &Config, cli: &cli::Cli, transcript_source: &str) -> Result<bool> {
+fn request_changed(cfg: &Config, cli: &cli::Cli, transcript_source: &str, requests_fp: &str) -> Result<bool> {
     // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut; rev 3: working scene-cut detection; rev 4: short-GOP rough cut).
     // The transcript's origin matters too: switching ASR <-> subtitles (or to a
     // different subtitle file) changes every word the later stages see.
-    let current = format!("from={:?} to={:?} cuts={} rev=4 transcript={transcript_source}", cli.range_from, cli.range_to, !cli.no_cuts);
-    let default = "from=None to=None cuts=true rev=4 transcript=asr";
+    let current = format!("from={:?} to={:?} cuts={} rev=4 transcript={transcript_source} requests={requests_fp}", cli.range_from, cli.range_to, !cli.no_cuts);
+    let default = "from=None to=None cuts=true rev=4 transcript=asr requests=none";
     let path = cfg.stage_dir().join("request.txt");
     let previous = std::fs::read_to_string(&path).ok();
     let changed = match &previous {

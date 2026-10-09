@@ -120,6 +120,8 @@ pub struct Config {
     pub top_n: usize,
     /// Candidates the rubric rates below this (0..1) are not worth rendering.
     pub min_clip_score: f64,
+    /// A clip for a client request must be at least this relevant (0..1) to be kept.
+    pub min_relevance: f64,
     /// Analyse laughter/applause/loudness and use it for clip selection.
     /// Use the source's own subtitles as the transcript when available.
     pub use_subtitles: bool,
@@ -186,6 +188,7 @@ impl Config {
             min_clip_duration: 5.0,
             top_n: 8,
             min_clip_score: env_f64("AICLIPPER_MIN_CLIP_SCORE", 0.3),
+            min_relevance: env_f64("AICLIPPER_MIN_RELEVANCE", 0.6),
             use_subtitles: env_bool("AICLIPPER_SUBTITLES", true),
             sub_langs: env("AICLIPPER_SUB_LANGS", "hi,en"),
             audio_events: env_bool("AICLIPPER_AUDIO_EVENTS", true),

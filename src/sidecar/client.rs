@@ -30,6 +30,15 @@ pub struct ScoreClipsResp {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct SelectClipsResp {
+    pub candidates: Vec<ClipCandidate>,
+    /// Best relevance (0..1) seen per request, kept or not — explains "no match".
+    pub best: Vec<f64>,
+    pub llm_output: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ContentEditResp {
     pub cut_ranges: Vec<RawCutRange>,
     pub shot_list: Vec<RawShotEntry>,
@@ -212,6 +221,27 @@ impl SidecarClient {
             last_end
         );
         Ok(Transcript { words: out.words })
+    }
+
+    /// Find clips for client requests (one proposal pass covers all requests).
+    /// `extra` = (request id, start, end, source) spans found by audio analysis.
+    pub async fn select_clips(
+        &self,
+        words: &[Word],
+        requests: &[crate::stages::requests::ClipRequest],
+        extra: &[(usize, f64, f64, String)],
+        cfg: &Config,
+    ) -> Result<SelectClipsResp> {
+        let body = json!({
+            "transcript": { "words": words },
+            "model": cfg.llm_model,
+            "requests": requests,
+            "max_tokens": cfg.llm_max_tokens,
+            "extra_candidates": extra.iter().map(|(r, s, e, src)| json!({"request": r, "start": s, "end": e, "source": src})).collect::<Vec<_>>(),
+        });
+        let out: SelectClipsResp = self.call("/v1/select_clips", body.clone(), "select_clips").await?;
+        crate::util::log_llm_call(&self.llm_log, "select_clips", &body, &serde_json::to_value(&out).unwrap_or_default());
+        Ok(out)
     }
 
     /// Laughter / applause / loudness analysis of a 16 kHz mono WAV.

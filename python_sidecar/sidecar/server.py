@@ -5,6 +5,7 @@ Endpoints (see src/sidecar/client.rs for the Rust shapes):
     POST /v1/score_clips   -> Gemma clip scoring
     POST /v1/content_edit  -> Gemma content-edit + shot list
     POST /v1/diarize       -> pyannote diarization of a WAV path
+    POST /v1/select_clips  -> Gemma: clips matching client requests
     POST /v1/audio_events  -> laughter / applause / loudness-peak analysis of a WAV path
     POST /v1/shutdown      -> graceful exit (Rust runs this on teardown)
 """
@@ -55,6 +56,8 @@ class Handler(BaseHTTPRequestHandler):
                 send(self, 200, self._content_edit())
             elif self.path == "/v1/diarize":
                 send(self, 200, self._diarize())
+            elif self.path == "/v1/select_clips":
+                send(self, 200, self._select_clips())
             elif self.path == "/v1/audio_events":
                 send(self, 200, self._audio_events())
             elif self.path == "/v1/transcribe":
@@ -103,6 +106,23 @@ class Handler(BaseHTTPRequestHandler):
             extra=body.get("extra_candidates") or None,
         )
         return {"candidates": candidates, "llm_output": llm_output, "prompt": full_prompt}
+
+    def _select_clips(self) -> dict:
+        body = read_body(self)
+        if not gemma.gemma_available():
+            raise RuntimeError(self._health_message())
+        words = body.get("transcript", {}).get("words", [])
+        requests = body.get("requests") or []
+        if not words or not requests:
+            raise ValueError("select_clips needs transcript words and requests")
+        candidates, best, llm_output, full_prompt = gemma.select_clips(
+            self._model_for(body),
+            words,
+            requests,
+            max_tokens=int(body.get("max_tokens", 4096)),
+            extra=body.get("extra_candidates") or None,
+        )
+        return {"candidates": candidates, "best": best, "llm_output": llm_output, "prompt": full_prompt}
 
     def _audio_events(self) -> dict:
         body = read_body(self)

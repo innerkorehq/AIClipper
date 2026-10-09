@@ -58,6 +58,18 @@ pub struct Cli {
     #[arg(long = "to", value_name = "TIME", value_parser = parse_time)]
     pub range_to: Option<f64>,
 
+    /// Describe a clip you want, in plain words (repeat for several clips), e.g.
+    /// `--ask "the funniest exchange about the DM mix-up, 30-45s"`. Count, duration
+    /// and time window can be written in the sentence ("2 clips", "30-45s", "after 10:00").
+    /// Replaces automatic clip picking. Not combinable with --from/--to.
+    #[arg(long = "ask", value_name = "TEXT")]
+    pub ask: Vec<String>,
+
+    /// A TOML file of clip requests (`[[clip]]` tables with ask, count, duration,
+    /// window, cuts) — see README. May be combined with --ask.
+    #[arg(long, value_name = "FILE")]
+    pub brief: Option<PathBuf>,
+
     /// Subtitle file (.srt/.vtt) to use as the transcript instead of ASR.
     /// By default subtitles shipped with the video are found automatically.
     #[arg(long, value_name = "FILE")]

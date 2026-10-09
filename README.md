@@ -67,6 +67,46 @@ cargo run --release -- --file /path/video.mp4 [--profiles instagram_reels,tiktok
 cargo run --release -- --file movie.mp4 --from 12:05 --to 12:40 --no-cuts
 ```
 
+### Asking for specific clips
+
+Tell the pipeline what you want instead of letting it pick. One or many requests; they replace the
+automatic picking, and a request with no good match produces **no clip** (it is never padded with an
+unrelated moment).
+
+```bash
+cargo run --release -- --file talk.mp4 \
+  --ask "the funniest exchange about the movie poster, 20-40s" \
+  --ask "2 clips where they explain the gym routine, after 10:00"
+cargo run --release -- --file talk.mp4 --brief clips.toml
+```
+
+Count, duration and a time window can be written in the sentence — `2 clips`, `30-45s`, `under 40 seconds`,
+`about a minute`, `after 10:00`, `between 5:00 and 12:30`, `in the first 10 minutes`. For anything
+explicit use a brief (explicit fields beat the sentence):
+
+```toml
+[[clip]]
+ask = "a funny moment about the movie poster"
+duration = [20, 40]            # seconds, of the FINISHED clip (selection leaves room for trimming)
+
+[[clip]]
+ask = "the part about steroids or the gym"
+count = 2
+window = ["2:00", "4:00"]      # only search inside this span
+cuts = false                   # keep this clip continuous (no filler/silence removal)
+label = "gym story"            # used in the file name: clip_001_gym-story.mp4
+tone = "intense"               # optional: any | funny | emotional | intense (steers the audio signals)
+```
+
+The parsed requests are printed before any model work, and a report (`<workdir>/clips_report.md`) lists,
+per request, the clips found (time, relevance, why, transcript excerpt) or how close the nearest moment
+came. Clips get names like `clip_000_funny-movie-poster`. A clip must rate at least 60% relevant
+(`AICLIPPER_MIN_RELEVANCE`). `--ask/--brief` cannot be combined with `--from/--to`.
+
+Limits: selection is text-based (transcript/subtitles plus laughter/loudness), so purely visual asks
+("when he falls off the horse") cannot be matched — use `--from/--to` for those. A request naming a
+speaker only works if the name is spoken in the transcript.
+
 ### Transcript source
 
 If the video comes with subtitles they are the transcript, and speech recognition is skipped:

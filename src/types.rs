@@ -42,7 +42,7 @@ impl Transcript {
 }
 
 /// A scored candidate clip (stage 5.3). Times are seconds in source-video time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ClipCandidate {
     pub start: f64,
     pub end: f64,
@@ -53,6 +53,15 @@ pub struct ClipCandidate {
     pub word_start: Option<usize>,
     #[serde(default)]
     pub word_end: Option<usize>,
+    /// Index of the clip request this candidate fulfils (None for auto-picked clips).
+    #[serde(default)]
+    pub request_id: Option<usize>,
+    /// How directly it satisfies its request, 0..1 (requests only).
+    #[serde(default)]
+    pub relevance: f64,
+    /// Per-request override of cut mode (Some(true) = keep continuous).
+    #[serde(default)]
+    pub no_cuts: Option<bool>,
 }
 
 /// A contiguous range of words to cut. `end_word_idx` is exclusive.

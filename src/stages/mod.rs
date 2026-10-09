@@ -6,6 +6,7 @@ pub mod content_edit;
 pub mod export;
 pub mod ingest;
 pub mod render;
+pub mod requests;
 pub mod rough_cut;
 pub mod score;
 pub mod shot_classify;

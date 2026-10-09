@@ -266,6 +266,162 @@ def score_clips(model_id: str, words: list[dict], max_clips: int, min_duration: 
     return out, "\n---\n".join(raws), "\n\n".join(prompt_log)
 
 
+# ---- client-requested clips ----------------------------------------------------------
+
+MAX_RATED_PER_REQUEST = 6
+
+
+def _request_line(r: dict) -> str:
+    lo, hi = r.get("min_s"), r.get("max_s")
+    dur = ""
+    if lo and hi:
+        dur = f" (duration {lo:.0f}-{hi:.0f}s)"
+    elif hi:
+        dur = f" (at most {hi:.0f}s)"
+    elif lo:
+        dur = f" (at least {lo:.0f}s)"
+    return f'{r["id"]}: "{r["text"]}"{dur}'
+
+
+def request_rubric_score(r: dict) -> float | None:
+    total = 0.0
+    for key, weight in prompts.REQUEST_RUBRIC_WEIGHTS.items():
+        try:
+            v = float(r[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+        total += weight * max(0.0, min(10.0, v)) / 10.0
+    return total
+
+
+def _rate_request(model_id: str, c: dict, req: dict, words: list[dict], max_tokens: int) -> tuple[float, float, str, str]:
+    """(score 0..1, relevance 0..1, reason, raw). Falls back to the proposal's own
+    relevance when the rating cannot be parsed."""
+    text = " ".join(w["text"] for w in words[c["lo"]:c["hi"]])
+    system = prompts.CLIP_REQUEST_RATE_SYSTEM.format(request=req["text"].replace('"', "'"))
+    user = f"Clip ({c['end'] - c['start']:.1f}s):\n{text}\nOutput the JSON now."
+    raw = _generate(model_id, system, user, min(max_tokens, 512))
+    try:
+        r = _extract_json(raw)
+        score = request_rubric_score(r) if isinstance(r, dict) else None
+        if score is None:
+            raise ValueError("incomplete rubric")
+        rel = max(0.0, min(10.0, float(r["relevance"]))) / 10.0
+        why = (
+            f"relevance {r['relevance']}/hook {r['hook']}/standalone {r['standalone']}/payoff {r['payoff']}/"
+            f"emotion {r['emotion']} - {r.get('reason', '')}"
+        )
+        return score, rel, why, raw
+    except (ValueError, TypeError):
+        # unusable rating: trust the proposal, discounted
+        rel = float(c.get("relevance", 0.0)) * 0.8
+        return rel * 0.8, rel, str(c.get("why", "")) + " (unrated)", raw
+
+
+def select_clips(
+    model_id: str,
+    words: list[dict],
+    requests: list[dict],
+    max_tokens: int,
+    extra: list[dict] | None = None,
+) -> tuple[list[dict], list[float], str, str]:
+    """Find clips for client requests. One proposal call per transcript window covers
+    ALL requests (cost does not grow with their number); every merged candidate is
+    then rated against its own request. Returns (candidates, best relevance per
+    request, raw output, prompt log). Candidates carry request_id, relevance (0..1),
+    score (0..1) and a rationale."""
+    raws: list[str] = []
+    prompt_log: list[str] = []
+    by_id = {r["id"]: r for r in requests}
+    best = {r["id"]: 0.0 for r in requests}
+    proposals: list[dict] = []
+
+    def propose(active_all: list[dict]) -> None:
+        """One proposal call per transcript window for the given requests."""
+        for lo, hi in _windows(len(words)):
+            w_start, w_end = words[lo]["start"], words[hi - 1]["end"]
+            # a request with a time window only sees the windows that overlap it
+            active = [
+                r for r in active_all
+                if not r.get("window") or (r["window"][0] < w_end and r["window"][1] > w_start)
+            ]
+            if not active:
+                continue
+            system = prompts.CLIP_REQUEST_SYSTEM.format(max_per_request=min(3, max(r["count"] for r in active) + 1))
+            user = (
+                prompts.CLIP_REQUEST_EXAMPLE
+                + "\n\nREQUESTS:\n" + "\n".join(_request_line(r) for r in active)
+                + "\n\nTranscript:\n" + _format_words(words, lo, hi)
+                + "\nOutput the JSON now."
+            )
+            prompt_log.append(user)
+            try:
+                data, raw = _generate_json(model_id, system, user, max_tokens)
+            except ValueError:
+                continue  # one bad window must not sink the run
+            raws.append(raw)
+            matches = data.get("matches") if isinstance(data, dict) else None
+            if not isinstance(matches, list):
+                continue
+            for m in matches:
+                try:
+                    rid = int(m["request"])
+                    rel = max(0.0, min(10.0, float(m["relevance"]))) / 10.0
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if rid not in by_id or rel < 0.5:
+                    continue
+                r = prompts.resolve_clip_times({**m, "score": rel}, words)
+                if r is None:
+                    continue
+                req = by_id[rid]
+                win = req.get("window")
+                if win and not (r["start"] >= win[0] - 1.0 and r["end"] <= win[1] + 1.0):
+                    continue
+                best[rid] = max(best[rid], rel)
+                proposals.append({
+                    **r, "request_id": rid, "relevance": rel, "why": str(m.get("why", "")),
+                    "lo": int(round(float(m["start_word_idx"]))), "hi": int(round(float(m["end_word_idx"]))) + 1,
+                })
+
+    # Pass 1: every request together (cost does not grow with their number).
+    propose(requests)
+
+    # Pass 2: small models answer the first request and drop the rest. Any request
+    # that came back with fewer distinct moments than it asked for gets its own
+    # focused pass, so it cannot be missed just because of its position in the list.
+    def distinct(rid: int) -> int:
+        return len(merge_proposals([{**p, "score": p["relevance"]} for p in proposals if p["request_id"] == rid]))
+
+    for r in requests:
+        if distinct(r["id"]) < r["count"]:
+            propose([r])
+
+    # Moments found by other means (audio laughter/loudness peaks) for specific requests.
+    for e in extra or []:
+        rid = e.get("request")
+        if rid not in by_id:
+            continue
+        span = _words_in(words, float(e["start"]), float(e["end"]))
+        if span is not None:
+            proposals.append({
+                "start": words[span[0]]["start"], "end": words[span[1] - 1]["end"], "score": 0.5,
+                "request_id": rid, "relevance": 0.5, "why": str(e.get("source", "audio")),
+                "lo": span[0], "hi": span[1], "rationale": str(e.get("source", "audio")),
+            })
+
+    out: list[dict] = []
+    for rid, req in by_id.items():
+        mine = merge_proposals([{**p, "score": p["relevance"]} for p in proposals if p["request_id"] == rid])
+        for c in mine[: max(MAX_RATED_PER_REQUEST, req["count"] * 2)]:
+            score, rel, why, raw = _rate_request(model_id, c, req, words, max_tokens)
+            raws.append(raw)
+            best[rid] = max(best[rid], rel)
+            out.append({"start": c["start"], "end": c["end"], "score": score, "relevance": rel, "request_id": rid, "rationale": why})
+    out.sort(key=lambda c: (c["request_id"], -c["score"]))
+    return out, [best[r["id"]] for r in requests], "\n---\n".join(raws), "\n\n".join(prompt_log)
+
+
 def content_edit(
     model_id: str,
     candidate: dict,

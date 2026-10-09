@@ -41,6 +41,38 @@ CLIP_RATE_EXAMPLE = """Example output:
 # Final score = weighted rubric. Hook and standalone matter most for shorts.
 RUBRIC_WEIGHTS = {"hook": 0.35, "standalone": 0.25, "payoff": 0.25, "emotion": 0.15}
 
+# ---- client-requested clips -----------------------------------------------------
+
+CLIP_REQUEST_SYSTEM = """You are the editor for a short-form video clipper. The client asked for SPECIFIC clips from a long video. You receive one part of the transcript (each word written `index:text`, with a `<t=SECONDS>` marker every few words) and a numbered list of REQUESTS.
+
+Find moments in THIS part of the transcript that satisfy a request.
+
+Rules:
+- A moment is a CONTIGUOUS range of word indexes (both inclusive) that starts at the beginning of a sentence or thought and ends after its payoff, within that request's duration limits.
+- Only return moments that genuinely satisfy the request. Returning nothing for a part is correct when it has no match. Never stretch a request to fit unrelated content.
+- `relevance` (0-10) = how directly the moment is what the request asked for. 10 = exactly it; 5 = loosely related; below 5 = do not return it.
+- Return up to {max_per_request} moments per request, best first.
+- Respond with ONLY JSON:
+{{"matches":[{{"request": INT, "start_word_idx": INT, "end_word_idx": INT, "relevance": INT, "why": STRING}}]}}"""
+
+CLIP_REQUEST_EXAMPLE = """Example. Requests: 0: "the part where they joke about the poster". Transcript:
+0:ok <t=0.0> 1:so 2:about 3:the 4:poster <t=1.2> 5:honestly 6:my 7:face 8:is 9:too 10:big. 11:Everyone 12:laughed 13:at 14:that.
+Output:
+{"matches":[{"request":0,"start_word_idx":2,"end_word_idx":14,"relevance":9,"why":"they joke that his face is too big for the poster"}]}"""
+
+CLIP_REQUEST_RATE_SYSTEM = """You are a strict judge of short-form video clips. The client asked for: "{request}". You receive ONE candidate clip's transcript. Rate it on five criteria, each an integer 0-10:
+- relevance: is this exactly what the client asked for? (0 = unrelated, 10 = precisely it)
+- hook: does it grab attention in the first ~3 seconds?
+- standalone: can a viewer with no context understand it?
+- payoff: does it deliver a clear answer, punchline or conclusion and end cleanly?
+- emotion: does it carry energy, humour, surprise or stakes?
+Be critical and honest about relevance: a clip that is merely on a nearby topic is a 3-4, not a 7. Respond with ONLY JSON:
+{{"relevance": INT, "hook": INT, "standalone": INT, "payoff": INT, "emotion": INT, "reason": STRING}}"""
+
+# Final score for a requested clip. Relevance dominates: a clip that is not what
+# was asked for must not win on being a good clip in general.
+REQUEST_RUBRIC_WEIGHTS = {"relevance": 0.55, "standalone": 0.15, "payoff": 0.15, "hook": 0.10, "emotion": 0.05}
+
 CONTENT_EDIT_SYSTEM = """You are the editor for one short-form vertical video clip. You receive: (a) the clip's transcript slice with indexes, (b) detected scene-change timestamps, and (c) the candidate clip's original score and rationale.
 
 Produce TWO things:
