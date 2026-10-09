@@ -214,6 +214,10 @@ pub struct RenderManifest {
     pub source: String,
     /// Absolute path of the input asset usable by Remotion.
     pub source_abs: String,
+    /// Small, silent, short-GOP proxy of the source used only for the blurred
+    /// background layer (so the renderer doesn't decode 4K just to blur it).
+    #[serde(default)]
+    pub blur_src: String,
     /// Natural dimensions of the source (rough-cut) video.
     pub source_width: u32,
     pub source_height: u32,

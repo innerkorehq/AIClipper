@@ -52,10 +52,25 @@ pub async fn render_all(
             .and_then(|e| e.to_str())
             .unwrap_or("mp4");
         let staged_name = format!("{}.{}", m.clip_id, ext);
-        let src_path = if m.source_abs.is_empty() { &m.source } else { &m.source_abs };
-        std::fs::copy(src_path, public_src.join(&staged_name))
+        let src_path: String = if m.source_abs.is_empty() { m.source.clone() } else { m.source_abs.clone() };
+        std::fs::copy(&src_path, public_src.join(&staged_name))
             .with_context(|| format!("staging source {src_path} for Remotion"))?;
         m.source_abs = format!("_sources/{staged_name}");
+
+        // Tiny silent proxy for the blurred background layer: decoding the full
+        // (often 4K) source a second/third time per frame only to blur it away is
+        // what stalls the renderer.
+        let blur_name = format!("{}_blur.mp4", m.clip_id);
+        let mut blur = Command::new(&cfg.ffmpeg);
+        blur.arg("-y")
+            .arg("-i")
+            .arg(&src_path)
+            .args(["-vf", "scale=-2:360", "-an"])
+            .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p"])
+            .args(["-g", "12", "-keyint_min", "12", "-movflags", "+faststart"])
+            .arg(public_src.join(&blur_name));
+        crate::util::run_ok(&mut blur, &format!("blur proxy for {}", m.clip_id)).await?;
+        m.blur_src = format!("_sources/{blur_name}");
 
         let path = renders.join(format!("manifest_{}.json", m.clip_id));
         let bytes = serde_json::to_vec_pretty(&m).context("serializing render manifest")?;

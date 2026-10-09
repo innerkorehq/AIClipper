@@ -393,6 +393,7 @@ pub fn build_manifest(
         fps,
         source: source.display().to_string(),
         source_abs: source_abs.display().to_string(),
+        blur_src: String::new(),
         source_width,
         source_height,
         shots,

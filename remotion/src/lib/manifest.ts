@@ -49,6 +49,8 @@ export type RenderManifest = {
   fps: number;
   source: string;
   source_abs: string;
+  /** Small silent proxy used only for the blurred background layer. */
+  blur_src?: string;
   source_width: number;
   source_height: number;
   shots: ShotSegment[];

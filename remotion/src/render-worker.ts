@@ -90,7 +90,20 @@ async function main() {
           audioCodec: "aac",
           outputLocation: outPath,
           concurrency: 2,
-          onProgress: () => undefined,
+          // 4K seeks can legitimately take a while; the 30s default aborts the clip.
+          timeoutInMilliseconds: 180000,
+          // Progress goes to stderr (stdout is reserved for the JSON summary) so a
+          // stalled render is visible instead of silent.
+          onProgress: (() => {
+            let lastDecile = -1;
+            return ({progress}: {progress: number}) => {
+              const decile = Math.floor(progress * 10);
+              if (decile !== lastDecile) {
+                lastDecile = decile;
+                console.error(`[render] ${manifest.clip_id} ${decile * 10}%`);
+              }
+            };
+          })(),
         });
         rendered.push(manifest.clip_id);
       } catch (err) {

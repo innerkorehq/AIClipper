@@ -45,7 +45,10 @@ pub async fn rough_cut(
         .arg(source.as_os_str())
         .arg("-t")
         .arg(format!("{dur:.3}"))
+        // Short GOP (-g 12): the renderer seeks around this file constantly, and with a
+        // long GOP every seek in a 4K stream decodes seconds of video first.
         .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p"])
+        .args(["-g", "12", "-keyint_min", "12"])
         .args(["-c:a", "aac", "-b:a", "192k"])
         .args(["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"])
         .arg(out.as_os_str());

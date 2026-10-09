@@ -363,12 +363,15 @@ export const ShotLayer: React.FC<{
     : null;
 
   // Background: blurred cover of the whole frame (fills letterbox edges).
+  // The blurred background never carries audio (the foreground video does — two
+  // audible layers doubled the sound) and uses the small proxy when available.
+  const blurSrc = manifest.blur_src ? staticFile(manifest.blur_src) : src;
   const BlurBack = (
     <Video
-      src={src}
+      src={blurSrc}
       startFrom={seg.video_trim_frame}
       endAt={endAt}
-      volume={edgeFade}
+      volume={0}
       style={{
         position: "absolute",
         width: "100%",
