@@ -230,12 +230,25 @@ impl SidecarClient {
         words: &[Word],
         requests: &[crate::stages::requests::ClipRequest],
         extra: &[(usize, f64, f64, String)],
+        context: &str,
         cfg: &Config,
     ) -> Result<SelectClipsResp> {
+        // each request carries its effective length limits (own or default)
+        let reqs: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|r| {
+                let (min_d, max_d) = crate::stages::score::bounds(cfg, r);
+                let mut v = serde_json::to_value(r).unwrap_or_default();
+                v["min_eff"] = json!(min_d);
+                v["max_eff"] = json!(max_d);
+                v
+            })
+            .collect();
         let body = json!({
             "transcript": { "words": words },
             "model": cfg.llm_model,
-            "requests": requests,
+            "context": context,
+            "requests": reqs,
             "max_tokens": cfg.llm_max_tokens,
             "extra_candidates": extra.iter().map(|(r, s, e, src)| json!({"request": r, "start": s, "end": e, "source": src})).collect::<Vec<_>>(),
         });

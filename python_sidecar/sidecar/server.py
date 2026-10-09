@@ -121,6 +121,7 @@ class Handler(BaseHTTPRequestHandler):
             requests,
             max_tokens=int(body.get("max_tokens", 4096)),
             extra=body.get("extra_candidates") or None,
+            context=str(body.get("context") or ""),
         )
         return {"candidates": candidates, "best": best, "llm_output": llm_output, "prompt": full_prompt}
 

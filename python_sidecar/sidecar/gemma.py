@@ -272,15 +272,10 @@ MAX_RATED_PER_REQUEST = 6
 
 
 def _request_line(r: dict) -> str:
-    lo, hi = r.get("min_s"), r.get("max_s")
-    dur = ""
-    if lo and hi:
-        dur = f" (duration {lo:.0f}-{hi:.0f}s)"
-    elif hi:
-        dur = f" (at most {hi:.0f}s)"
-    elif lo:
-        dur = f" (at least {lo:.0f}s)"
-    return f'{r["id"]}: "{r["text"]}"{dur}'
+    # always state the length: without it the model returns 2-second or 10-minute "moments"
+    lo = r.get("min_eff") or r.get("min_s") or 15
+    hi = r.get("max_eff") or r.get("max_s") or 60
+    return f'{r["id"]}: "{r["text"]}" (duration {lo:.0f}-{hi:.0f}s)'
 
 
 def request_rubric_score(r: dict) -> float | None:
@@ -294,12 +289,13 @@ def request_rubric_score(r: dict) -> float | None:
     return total
 
 
-def _rate_request(model_id: str, c: dict, req: dict, words: list[dict], max_tokens: int) -> tuple[float, float, str, str]:
+def _rate_request(model_id: str, c: dict, req: dict, words: list[dict], max_tokens: int, context: str = "") -> tuple[float, float, str, str]:
     """(score 0..1, relevance 0..1, reason, raw). Falls back to the proposal's own
     relevance when the rating cannot be parsed."""
     text = " ".join(w["text"] for w in words[c["lo"]:c["hi"]])
     system = prompts.CLIP_REQUEST_RATE_SYSTEM.format(request=req["text"].replace('"', "'"))
-    user = f"Clip ({c['end'] - c['start']:.1f}s):\n{text}\nOutput the JSON now."
+    ctx = f"VIDEO CONTEXT:\n{context}\n\n" if context else ""
+    user = f"{ctx}Clip ({c['end'] - c['start']:.1f}s):\n{text}\nOutput the JSON now."
     raw = _generate(model_id, system, user, min(max_tokens, 512))
     try:
         r = _extract_json(raw)
@@ -324,6 +320,7 @@ def select_clips(
     requests: list[dict],
     max_tokens: int,
     extra: list[dict] | None = None,
+    context: str = "",
 ) -> tuple[list[dict], list[float], str, str]:
     """Find clips for client requests. One proposal call per transcript window covers
     ALL requests (cost does not grow with their number); every merged candidate is
@@ -350,6 +347,7 @@ def select_clips(
             system = prompts.CLIP_REQUEST_SYSTEM.format(max_per_request=min(3, max(r["count"] for r in active) + 1))
             user = (
                 prompts.CLIP_REQUEST_EXAMPLE
+                + (f"\n\nVIDEO CONTEXT:\n{context}" if context else "")
                 + "\n\nREQUESTS:\n" + "\n".join(_request_line(r) for r in active)
                 + "\n\nTranscript:\n" + _format_words(words, lo, hi)
                 + "\nOutput the JSON now."
@@ -371,10 +369,25 @@ def select_clips(
                     continue
                 if rid not in by_id or rel < 0.5:
                     continue
+                # The model sometimes invents indexes outside the part it was shown
+                # (spans of thousands of words); only trust spans inside this window.
+                try:
+                    si, ei = int(round(float(m["start_word_idx"]))), int(round(float(m["end_word_idx"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not (lo <= si <= ei < hi):
+                    continue
                 r = prompts.resolve_clip_times({**m, "score": rel}, words)
                 if r is None:
                     continue
                 req = by_id[rid]
+                dur = r["end"] - r["start"]
+                lo_d = req.get("min_eff") or req.get("min_s") or 15
+                hi_d = req.get("max_eff") or req.get("max_s") or 60
+                # modestly long spans are trimmed to a sentence boundary downstream;
+                # wildly wrong ones (a 10-minute "moment", a 2-second one) are discarded
+                if dur > hi_d * 2.5 or dur < min(lo_d, 8.0) * 0.4:
+                    continue
                 win = req.get("window")
                 if win and not (r["start"] >= win[0] - 1.0 and r["end"] <= win[1] + 1.0):
                     continue
@@ -414,7 +427,7 @@ def select_clips(
     for rid, req in by_id.items():
         mine = merge_proposals([{**p, "score": p["relevance"]} for p in proposals if p["request_id"] == rid])
         for c in mine[: max(MAX_RATED_PER_REQUEST, req["count"] * 2)]:
-            score, rel, why, raw = _rate_request(model_id, c, req, words, max_tokens)
+            score, rel, why, raw = _rate_request(model_id, c, req, words, max_tokens, context)
             raws.append(raw)
             best[rid] = max(best[rid], rel)
             out.append({"start": c["start"], "end": c["end"], "score": score, "relevance": rel, "request_id": rid, "rationale": why})

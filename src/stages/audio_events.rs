@@ -17,7 +17,7 @@ use std::path::Path;
 /// A window counts as "laughing" at or above this probability.
 pub const LAUGH_ON: f32 = 0.25;
 /// A laughter run needs at least one window this strong to become an event.
-pub const LAUGH_PEAK_MIN: f32 = 0.40;
+pub const LAUGH_PEAK_MIN: f32 = 0.30;
 /// Loudness z-score (vs the surrounding minute) that counts as a loud peak.
 pub const LOUD_PEAK_Z: f32 = 2.5;
 /// Laughter probabilities rarely approach 1; this is "very clear laughter".
@@ -187,9 +187,12 @@ pub fn candidate_spans(
     min_d: f64,
     max_d: f64,
     limit: usize,
+    kinds: &[EventKind],
 ) -> Vec<(f64, f64, String)> {
     use crate::stages::score::{ends_sentence, sentence_starts};
-    let mut events = audio.events();
+    // Laughter probability and loudness z-score are different scales, so a
+    // "funny" ask must not compete laughter against loud peaks for the same slots.
+    let mut events: Vec<Event> = audio.events().into_iter().filter(|e| kinds.contains(&e.kind)).collect();
     events.sort_by(|a, b| b.peak.partial_cmp(&a.peak).unwrap_or(std::cmp::Ordering::Equal));
     let mut out = Vec::new();
     for ev in events.into_iter().take(limit) {
@@ -251,7 +254,7 @@ mod tests {
         l[10] = 0.3;
         l[11] = 0.7;
         l[12] = 0.5; // strong run
-        l[30] = 0.3; // weak blip below LAUGH_PEAK_MIN
+        l[30] = 0.28; // weak blip below LAUGH_PEAK_MIN
         let a = ev(&l, &vec![0.0; 40]);
         let events: Vec<_> = a.events().into_iter().filter(|e| e.kind == EventKind::Laughter).collect();
         assert_eq!(events.len(), 1);
@@ -284,6 +287,24 @@ mod tests {
         let outside = a.stats(0.0, 10.0);
         assert!(inside.laugh_max > 0.8 && inside.score() > 0.7);
         assert_eq!(outside.score(), 0.0);
+    }
+
+    #[test]
+    fn candidate_spans_respect_the_requested_event_kinds() {
+        let words: Vec<Word> = (0..400).map(|i| Word { text: if i % 8 == 7 { "x.".into() } else { "x".into() }, start: i as f64 * 0.5, end: i as f64 * 0.5 + 0.4 }).collect();
+        let mut l = vec![0.0; 120];
+        l[40] = 0.5; // a modest laugh at ~61s
+        let mut z = vec![0.0; 120];
+        z[80] = 5.0; // a very loud moment at ~121s that would outrank it on one list
+        let mut a = ev(&l, &z);
+        a.duration = 200.0;
+        let laugh = candidate_spans(&words, &a, 15.0, 60.0, 1, &[EventKind::Laughter]);
+        assert_eq!(laugh.len(), 1);
+        assert!(laugh[0].2.contains("laughter"), "{:?}", laugh);
+        let loud = candidate_spans(&words, &a, 15.0, 60.0, 1, &[EventKind::Loud]);
+        assert!(loud[0].2.contains("loud"), "{:?}", loud);
+        let both = candidate_spans(&words, &a, 15.0, 60.0, 1, &[EventKind::Laughter, EventKind::Loud]);
+        assert!(both[0].2.contains("loud"), "on one list the louder event wins the only slot: {:?}", both);
     }
 
     #[test]

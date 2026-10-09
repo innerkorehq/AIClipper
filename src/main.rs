@@ -152,6 +152,16 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         }
     }
     let requests_fp = stages::requests::fingerprint(&requests);
+    // What the video says about itself (title, channel, chapters) for the model.
+    let context = if requests.is_empty() {
+        String::new()
+    } else {
+        stages::ingest::ensure_info_json(&cfg, input).await; // also covers a reused (cached) ingest
+        stages::ingest::video_context(&cfg)
+    };
+    if !context.is_empty() {
+        tracing::info!("video context available ({} chars: title/description/chapters)", context.len());
+    }
 
     // ---- 5.2 transcript: the source's own subtitles beat ASR ------------------
     // Subtitles shipped with the video (sidecar file, embedded track, or the
@@ -241,7 +251,7 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
             &store,
             "requested_clips",
             force_clip,
-            stages::score::select_for_requests(&cfg, &sidecar, &transcript, audio.as_ref(), &requests, !cli.no_cuts),
+            stages::score::select_for_requests(&cfg, &sidecar, &transcript, audio.as_ref(), &requests, !cli.no_cuts, &context),
         )
         .await?;
         if matches!(fresh, Freshness::Computed) {

@@ -43,22 +43,25 @@ RUBRIC_WEIGHTS = {"hook": 0.35, "standalone": 0.25, "payoff": 0.25, "emotion": 0
 
 # ---- client-requested clips -----------------------------------------------------
 
-CLIP_REQUEST_SYSTEM = """You are the editor for a short-form video clipper. The client asked for SPECIFIC clips from a long video. You receive one part of the transcript (each word written `index:text`, with a `<t=SECONDS>` marker every few words) and a numbered list of REQUESTS.
+CLIP_REQUEST_SYSTEM = """You are the editor for a short-form video clipper. The client asked for SPECIFIC clips from a long video. You receive one part of the transcript (each word written `index:text`, with a `<t=SECONDS>` marker every few words) and a numbered list of REQUESTS. The transcript is machine-generated and may be garbled or mix Hindi and English: judge by the gist.
 
 Find moments in THIS part of the transcript that satisfy a request.
 
 Rules:
-- A moment is a CONTIGUOUS range of word indexes (both inclusive) that starts at the beginning of a sentence or thought and ends after its payoff, within that request's duration limits.
+- Use ONLY word indexes that appear in the transcript below. A moment is a CONTIGUOUS range of those indexes (both inclusive), at most one scene or exchange long, within the request's duration limits (about 3 words per second).
+- It starts at the beginning of a sentence or thought and ends after its payoff.
+- The transcript has NO speaker labels and rarely names the speakers. The VIDEO CONTEXT says who is in the video: if the request names people the context says are in the video (e.g. the host and the guest of a two-person podcast), assume they are the speakers and judge only the CONTENT and TONE of the moment. Do not require names to be spoken.
 - Only return moments that genuinely satisfy the request. Returning nothing for a part is correct when it has no match. Never stretch a request to fit unrelated content.
-- `relevance` (0-10) = how directly the moment is what the request asked for. 10 = exactly it; 5 = loosely related; below 5 = do not return it.
+- `evidence`: quote 3-10 words copied from the moment that show why it matches. No evidence, no match.
+- `relevance` (0-10): how directly the moment is what the request asked for. 10 = exactly it; 5 = loosely related; below 5 = do not return it.
 - Return up to {max_per_request} moments per request, best first.
 - Respond with ONLY JSON:
-{{"matches":[{{"request": INT, "start_word_idx": INT, "end_word_idx": INT, "relevance": INT, "why": STRING}}]}}"""
+{{"matches":[{{"request": INT, "start_word_idx": INT, "end_word_idx": INT, "relevance": INT, "evidence": STRING, "why": STRING}}]}}"""
 
 CLIP_REQUEST_EXAMPLE = """Example. Requests: 0: "the part where they joke about the poster". Transcript:
 0:ok <t=0.0> 1:so 2:about 3:the 4:poster <t=1.2> 5:honestly 6:my 7:face 8:is 9:too 10:big. 11:Everyone 12:laughed 13:at 14:that.
 Output:
-{"matches":[{"request":0,"start_word_idx":2,"end_word_idx":14,"relevance":9,"why":"they joke that his face is too big for the poster"}]}"""
+{"matches":[{"request":0,"start_word_idx":2,"end_word_idx":14,"relevance":9,"evidence":"my face is too big","why":"they joke that his face is too big for the poster"}]}"""
 
 CLIP_REQUEST_RATE_SYSTEM = """You are a strict judge of short-form video clips. The client asked for: "{request}". You receive ONE candidate clip's transcript. Rate it on five criteria, each an integer 0-10:
 - relevance: is this exactly what the client asked for? (0 = unrelated, 10 = precisely it)
@@ -66,7 +69,7 @@ CLIP_REQUEST_RATE_SYSTEM = """You are a strict judge of short-form video clips. 
 - standalone: can a viewer with no context understand it?
 - payoff: does it deliver a clear answer, punchline or conclusion and end cleanly?
 - emotion: does it carry energy, humour, surprise or stakes?
-Be critical and honest about relevance: a clip that is merely on a nearby topic is a 3-4, not a 7. Respond with ONLY JSON:
+The transcript is machine-generated and may be garbled or mix Hindi and English: judge by the gist. Be critical and honest about relevance: a clip that is merely on a nearby topic is a 3-4, not a 7. Do not penalise a clip for not naming its speakers: if the VIDEO CONTEXT says the people named in the request are in the video, assume they are the speakers and judge only content and tone. Respond with ONLY JSON:
 {{"relevance": INT, "hook": INT, "standalone": INT, "payoff": INT, "emotion": INT, "reason": STRING}}"""
 
 # Final score for a requested clip. Relevance dominates: a clip that is not what

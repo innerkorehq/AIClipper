@@ -5,7 +5,7 @@
 //! spans from word offsets. Deterministic dedupe/ranking happens here.
 
 use crate::config::Config;
-use crate::stages::audio_events::{candidate_spans, extended_end, AudioEvents};
+use crate::stages::audio_events::{candidate_spans, extended_end, AudioEvents, EventKind};
 use crate::stages::requests::{ClipRequest, Tone};
 use crate::sidecar::{ScoreClipsResp, SidecarClient};
 use crate::types::{ClipCandidate, Transcript, Word};
@@ -21,7 +21,7 @@ pub async fn score(
     // Moments the audio says are worth a look (laughter / cheering / loud peaks)
     // are rated alongside the model's own proposals.
     let extra = audio
-        .map(|a| candidate_spans(&transcript.words, a, cfg.min_clip_duration, cfg.max_clip_duration, cfg.top_n * 2))
+        .map(|a| candidate_spans(&transcript.words, a, cfg.min_clip_duration, cfg.max_clip_duration, cfg.top_n * 2, &[EventKind::Laughter, EventKind::Loud]))
         .unwrap_or_default();
     if !extra.is_empty() {
         tracing::info!("{} audio-driven candidates (laughter/loudness peaks)", extra.len());
@@ -75,11 +75,41 @@ pub async fn score(
     Ok(kept)
 }
 
-/// Duration limits for a request: its own, else the global ones; never inverted.
+/// Default length of a requested clip when the ask gives none: a short-form
+/// sized clip. (Without a stated length the model proposes 2-second or 10-minute
+/// "moments".) Still bounded by the global limits.
+const REQUEST_DEFAULT_MIN_S: f64 = 15.0;
+const REQUEST_DEFAULT_MAX_S: f64 = 60.0;
+
+/// Duration limits for a request: its own, else short-form defaults within the
+/// global limits; never inverted.
 pub fn bounds(cfg: &Config, r: &ClipRequest) -> (f64, f64) {
-    let min_d = r.min_s.unwrap_or(cfg.min_clip_duration);
-    let max_d = r.max_s.unwrap_or(cfg.max_clip_duration).max(min_d + 1.0);
+    let min_d = r.min_s.unwrap_or(REQUEST_DEFAULT_MIN_S.max(cfg.min_clip_duration));
+    let max_d = r.max_s.unwrap_or(REQUEST_DEFAULT_MAX_S.min(cfg.max_clip_duration)).max(min_d + 1.0);
     (min_d, max_d)
+}
+
+/// For asks about a *kind* of moment (funny / emotional / intense) the audio is
+/// evidence of that kind — evidence the text model, often reading garbled
+/// Hinglish, cannot give. So for those asks:
+///   * clearly audible laughter makes a clip that is not garbage (relevance ≥ 0.2)
+///     relevant in its own right (a floor that rises with the laughter), and
+///   * any on-topic clip (≥ 0.4) is lifted toward 1 in proportion to the reaction.
+/// Never lowers relevance; plain asks are judged on the text alone.
+pub fn lift_relevance(rel: f64, tone: Tone, a: &crate::stages::audio_events::ClipAudio) -> f64 {
+    let reaction = match tone {
+        Tone::Any => return rel,
+        Tone::Funny => ((a.laugh_max / 0.6).min(1.0)).max(0.8 * a.crowd_max.min(1.0)) as f64,
+        Tone::Emotional | Tone::Intense => a.loud as f64,
+    };
+    let mut out = rel;
+    if rel >= 0.4 {
+        out = rel + (1.0 - rel) * 0.6 * reaction;
+    }
+    if tone == Tone::Funny && rel >= 0.2 && a.laugh_max >= 0.3 {
+        out = out.max(0.45 + 0.4 * reaction);
+    }
+    out
 }
 
 /// Share of a clip that filler/silence trimming may typically remove. A client who
@@ -110,6 +140,7 @@ pub async fn select_for_requests(
     audio: Option<&AudioEvents>,
     requests: &[ClipRequest],
     allow_cuts: bool,
+    context: &str,
 ) -> Result<(Vec<ClipCandidate>, Vec<f64>)> {
     if transcript.words.is_empty() {
         anyhow::bail!("clip requests need a transcript, but there are no words (no speech/subtitles) — use --from/--to instead");
@@ -119,7 +150,15 @@ pub async fn select_for_requests(
     if let Some(a) = audio {
         for r in requests.iter().filter(|r| r.tone != Tone::Any) {
             let (min_d, max_d) = bounds(cfg, r);
-            for (s, e, src) in candidate_spans(&transcript.words, a, min_d, max_d, cfg.top_n) {
+            // what each kind of ask listens for: funny → laughter; intense → loud
+            // peaks; emotional → either
+            let kinds: &[EventKind] = match r.tone {
+                Tone::Funny => &[EventKind::Laughter],
+                Tone::Intense => &[EventKind::Loud],
+                _ => &[EventKind::Laughter, EventKind::Loud],
+            };
+            let limit = cfg.top_n.max(r.count * 6);
+            for (s, e, src) in candidate_spans(&transcript.words, a, min_d, max_d, limit, kinds) {
                 if r.window.map(|(ws, we)| s >= ws - 1.0 && e <= we + 1.0).unwrap_or(true) {
                     extra.push((r.id, s, e, src));
                 }
@@ -127,7 +166,7 @@ pub async fn select_for_requests(
         }
     }
     let resp = client
-        .select_clips(&transcript.words, requests, &extra, cfg)
+        .select_clips(&transcript.words, requests, &extra, context, cfg)
         .await
         .context("Gemma clip selection for requests")?;
 
@@ -143,6 +182,13 @@ pub async fn select_for_requests(
         };
         let mut c = finalize_candidate(c, &transcript.words, audio, selection_min(req, min_d, max_d, allow_cuts), max_d, audio_w);
         c.no_cuts = req.no_cuts;
+        if let Some(a) = audio {
+            let lifted = lift_relevance(c.relevance, req.tone, &a.stats(c.start, c.end));
+            if lifted > c.relevance + 1e-9 {
+                c.rationale = format!("{} | relevance {:.0}%→{:.0}% on audio reaction", c.rationale, c.relevance * 100.0, lifted * 100.0);
+                c.relevance = lifted;
+            }
+        }
         let dur = c.end - c.start;
         let in_window = req.window.map(|(a, b)| c.start >= a - 1.0 && c.end <= b + 1.0).unwrap_or(true);
         if c.relevance >= cfg.min_relevance && dur >= min_d - 0.5 && dur <= max_d + 0.5 && in_window {
@@ -477,10 +523,27 @@ mod tests {
     }
 
     #[test]
+    fn audio_lifts_relevance_only_for_tone_asks_and_only_when_on_topic() {
+        use crate::stages::audio_events::ClipAudio;
+        let laugh = ClipAudio { laugh_max: 0.6, laugh_frac: 0.5, crowd_max: 0.0, loud: 0.2 };
+        let quiet = ClipAudio::default();
+        // funny ask, on-topic clip, strong laughter: lift gives 0.5 + 0.5*0.6*1.0 = 0.8,
+        // the laughter floor gives 0.45 + 0.4*1.0 = 0.85 — the higher wins
+        assert!((lift_relevance(0.5, Tone::Funny, &laugh) - 0.85).abs() < 1e-9);
+        assert_eq!(lift_relevance(0.5, Tone::Funny, &quiet), 0.5, "no reaction, no lift");
+        assert!(lift_relevance(0.3, Tone::Funny, &laugh) >= 0.6, "strong laughter alone carries a not-garbage clip");
+        assert_eq!(lift_relevance(0.1, Tone::Funny, &laugh), 0.1, "garbage stays garbage even with laughter");
+        let faint = ClipAudio { laugh_max: 0.2, laugh_frac: 0.1, crowd_max: 0.0, loud: 0.0 };
+        assert_eq!(lift_relevance(0.3, Tone::Funny, &faint), 0.3, "faint laughter is not evidence");
+        assert_eq!(lift_relevance(0.5, Tone::Any, &laugh), 0.5, "plain asks are judged on text alone");
+        assert!(lift_relevance(0.9, Tone::Funny, &laugh) <= 1.0);
+    }
+
+    #[test]
     fn request_bounds_fall_back_and_never_invert() {
         let cfg = Config::default_with_workdir(std::path::PathBuf::from("w"));
         let mut r = req(0, 1);
-        assert_eq!(bounds(&cfg, &r), (cfg.min_clip_duration, cfg.max_clip_duration));
+        assert_eq!(bounds(&cfg, &r), (15.0, 60.0), "short-form defaults when the ask gives no length");
         r.min_s = Some(30.0);
         r.max_s = Some(45.0);
         assert_eq!(bounds(&cfg, &r), (30.0, 45.0));
