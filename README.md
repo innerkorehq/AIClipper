@@ -67,6 +67,32 @@ cargo run --release -- --file /path/video.mp4 [--profiles instagram_reels,tiktok
 cargo run --release -- --file movie.mp4 --from 12:05 --to 12:40 --no-cuts
 ```
 
+### Framing: how each shot is cropped to vertical
+
+There is a menu of framing algorithms and an AI chooser that picks one **per shot**. Deterministic code
+measures each shot (faces, how much the main face moves, motion energy and activity, saliency focus, how
+much is speech) and works out which algorithms can physically run on it; the model then picks the one that
+fits the footage, the request and what the video is, and says why. Code only guards the answer (an unknown
+or impossible pick is replaced by the default and the reason recorded) and covers for a model that is
+unavailable.
+
+| algorithm | what it does |
+|---|---|
+| `face_follow` | follows the main face, full-height vertical window |
+| `speaker_follow` | follows whoever is speaking among several faces |
+| `split_two` | two people stacked, each fixed to their own half |
+| `group_fit` | a window just large enough to contain every face |
+| `punch_in` | tight zoom on one face (emphasis/reaction; short shots only) |
+| `locked` | one fixed window, no camera motion (still subjects) |
+| `saliency_follow` | follows the visually salient region (no faces needed) |
+| `motion_follow` | follows where the motion is (action, sports, dance) |
+| `wide_blur` | whole scene centred over a blurred fill (nothing cropped) |
+
+`--framing auto` (default, the AI chooses) · `--framing rules` (deterministic, no model) ·
+`--framing <algorithm>` (force one where it can run; for debugging/comparison). What was chosen for every
+shot, by whom and why, with the measurements, is in `<workdir>/framing/<clip>.md`. Changing `--framing`
+recomputes the clip stages.
+
 ### Asking for specific clips
 
 Tell the pipeline what you want instead of letting it pick. One or many requests; they replace the

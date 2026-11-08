@@ -129,9 +129,6 @@ async fn classify_one(
         .collect();
     let region_of = |t: f64| cuts.iter().filter(|c| **c <= t).count();
     let raw: Vec<Layout> = samples.iter().map(|s| sample_layout(cfg, s)).collect();
-    for (sm, l) in samples.iter().zip(raw.iter()) {
-        tracing::debug!("t={:.1} faces={:?} -> {:?}", sm.time, sm.faces.iter().map(|f| (f.confidence, f.bbox.w * f.bbox.h)).collect::<Vec<_>>(), l);
-    }
     let mut labels = raw.clone();
     let mut i = 0;
     while i < samples.len() {

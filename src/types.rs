@@ -174,6 +174,19 @@ pub struct ShotSegment {
     pub start_frame: u32,
     pub end_frame: u32,
     pub strategy: ShotStrategy,
+    /// Framing algorithm chosen for this shot (see `stages::framing::Algo`); empty on
+    /// manifests written before algorithms existed, which the renderer frames the old way.
+    #[serde(default)]
+    pub algorithm: String,
+    /// How the crop window is derived from the tracked box: max | fit | zoom | split | contain.
+    #[serde(default)]
+    pub window: String,
+    /// Zoom factor for `window = "zoom"` (> 1 = tighter than the largest window).
+    #[serde(default)]
+    pub zoom: f32,
+    /// What the tracked box is: "face" (grown to head-and-shoulders) or "region" (used as is).
+    #[serde(default)]
+    pub subject: String,
     pub keyframes: Vec<BBoxKeyframe>,
     /// Secondary subject track (normalized boxes) for two-speaker shots —
     /// the renderer stacks them top/bottom. Empty unless a second confident

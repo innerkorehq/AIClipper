@@ -152,13 +152,10 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
         }
     }
     let requests_fp = stages::requests::fingerprint(&requests);
+    let framing_mode = stages::chooser::FramingMode::parse(&cli.framing).map_err(|e| anyhow::anyhow!(e))?;
     // What the video says about itself (title, channel, chapters) for the model.
-    let context = if requests.is_empty() {
-        String::new()
-    } else {
-        stages::ingest::ensure_info_json(&cfg, input).await; // also covers a reused (cached) ingest
-        stages::ingest::video_context(&cfg)
-    };
+    stages::ingest::ensure_info_json(&cfg, input).await; // also covers a reused (cached) ingest
+    let context = stages::ingest::video_context(&cfg);
     if !context.is_empty() {
         tracing::info!("video context available ({} chars: title/description/chapters)", context.len());
     }
@@ -387,7 +384,34 @@ async fn pipeline(cfg: Config, store: ArtifactStore, sidecar: SidecarClient, cli
                     &vision,
                 )
                 .await?;
-                Ok(build_segments_for_clip(&cfg, fps_f, candidate.start, &classified, &speakers))
+                // 5.7b framing: measure each shot, let the AI choose how to frame it.
+                let motion = match stages::motion::analyze(&cfg, &rough_abs).await {
+                    Ok(mut m) => {
+                        m.mask_cuts(&roughs[idx].scene_cuts); // a camera cut is not motion
+                        Some(m)
+                    }
+                    Err(e) => {
+                        tracing::warn!("motion analysis unavailable ({e:#}); framing without it");
+                        None
+                    }
+                };
+                let feats: Vec<stages::framing::ShotFeatures> = classified
+                    .iter()
+                    .map(|s| stages::framing::compute_features(&cfg, s, &transcript.words, motion.as_ref(), candidate.start))
+                    .collect();
+                let ask = candidate.request_id.and_then(|id| requests.get(id)).map(|r| r.text.as_str()).unwrap_or("");
+                let choices = stages::chooser::choose(&cfg, &sidecar, &framing_mode, &feats, &context, ask).await;
+                for (s, c) in classified.iter().zip(&choices) {
+                    tracing::info!("  shot {:.1}–{:.1}s → {} ({}): {}", s.start, s.end, c.algo.name(), c.source.label(), c.reason);
+                }
+                let framing_dir = cfg.workdir.join("framing");
+                let _ = std::fs::create_dir_all(&framing_dir);
+                let _ = std::fs::write(
+                    framing_dir.join(format!("{}.md", clip_name(idx, candidate, &requests))),
+                    stages::chooser::report_section(&clip_name(idx, candidate, &requests), &classified, &feats, &choices, &framing_mode),
+                );
+                let algos: Vec<stages::framing::Algo> = choices.iter().map(|c| c.algo).collect();
+                Ok(build_segments_for_clip(&cfg, fps_f, candidate.start, &classified, &speakers, &algos, motion.as_ref()))
             },
         )
         .await?;
@@ -559,11 +583,11 @@ fn manual_candidate(cli: &cli::Cli, transcript: &Transcript, duration: f64) -> R
 /// this workdir. In that case stale per-clip artifacts and cached frame
 /// detections are cleared. Records the current request either way.
 fn request_changed(cfg: &Config, cli: &cli::Cli, transcript_source: &str, requests_fp: &str) -> Result<bool> {
-    // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut; rev 3: working scene-cut detection; rev 4: short-GOP rough cut).
+    // `rev` bumps when clip-stage semantics change (rev 2: frame-accurate rough cut; rev 3: working scene-cut detection; rev 4: short-GOP rough cut; rev 5: per-shot framing algorithms).
     // The transcript's origin matters too: switching ASR <-> subtitles (or to a
     // different subtitle file) changes every word the later stages see.
-    let current = format!("from={:?} to={:?} cuts={} rev=4 transcript={transcript_source} requests={requests_fp}", cli.range_from, cli.range_to, !cli.no_cuts);
-    let default = "from=None to=None cuts=true rev=4 transcript=asr requests=none";
+    let current = format!("from={:?} to={:?} cuts={} rev=5 transcript={transcript_source} requests={requests_fp} framing={}", cli.range_from, cli.range_to, !cli.no_cuts, cli.framing);
+    let default = "from=None to=None cuts=true rev=5 transcript=asr requests=none framing=auto";
     let path = cfg.stage_dir().join("request.txt");
     let previous = std::fs::read_to_string(&path).ok();
     let changed = match &previous {

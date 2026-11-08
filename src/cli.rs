@@ -79,10 +79,21 @@ pub struct Cli {
     #[arg(long)]
     pub no_subtitles: bool,
 
+    /// How each shot is framed for vertical: `auto` (the AI picks a framing
+    /// algorithm per shot, default), `rules` (deterministic, no model), or the
+    /// name of one algorithm to force: face_follow, speaker_follow, split_two,
+    /// group_fit, punch_in, locked, saliency_follow, motion_follow, wide_blur.
+    #[arg(long, value_name = "MODE", default_value = "auto", value_parser = parse_framing)]
+    pub framing: String,
+
     /// Keep the clip continuous: do not cut filler, silences or tangents.
     /// Use for action scenes / footage without speech.
     #[arg(long)]
     pub no_cuts: bool,
+}
+
+fn parse_framing(s: &str) -> Result<String, String> {
+    crate::stages::chooser::FramingMode::parse(s).map(|m| m.label())
 }
 
 /// Parse `90`, `90.5`, `1:30`, `01:02:03.5` into seconds.

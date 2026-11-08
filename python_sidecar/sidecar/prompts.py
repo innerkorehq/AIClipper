@@ -76,6 +76,21 @@ The transcript is machine-generated and may be garbled or mix Hindi and English:
 # was asked for must not win on being a good clip in general.
 REQUEST_RUBRIC_WEIGHTS = {"relevance": 0.55, "standalone": 0.15, "payoff": 0.15, "hook": 0.10, "emotion": 0.05}
 
+# ---- framing: choosing how each shot is cropped to vertical --------------------------
+
+FRAMING_SYSTEM = """You are the camera operator for a short-form vertical (9:16) video cut from a landscape video. For each SHOT you receive measurements taken by software and must choose ONE framing algorithm for it from the MENU.
+
+How to decide:
+- Follow the footage, not habit. Each shot has `in_words`, a plain description, plus the raw measurements; trust `in_words` first and never claim a quality it does not state (do not call a static picture busy). The measurements are evidence: how many faces, whether the main face moves, how much of the frame is changing (motion_energy: about 0.01 is static, above 0.04 is busy), motion_activity (the share of the shot in which something distinct moves; it catches a small subject moving fast, such as a person in a wide shot, which motion_energy underrates), whether attention has a clear focal point (saliency_focus), and how much of the shot is speech.
+- Pick only from the shot's `feasible` list. An algorithm outside it cannot run on that shot.
+- Prefer steady, unfussy framing. Use a dramatic choice (punch_in, motion_follow) only when the measurements and the request support it. punch_in suits short shots (under about 4 seconds).
+- Two people on screen together: split_two when both matter, speaker_follow when the camera stays wide and one speaks at a time, group_fit for three or more. One person: face_follow, or locked if they barely move and a still frame will look calmer. No faces: motion_follow for action, saliency_follow for a clear focal point, wide_blur when nothing should be cropped.
+- Let the request and the video context shape the choice (an action scene, a podcast, a tutorial each want different framing).
+- Give a one-sentence reason that cites the measurements.
+
+Respond with ONLY JSON, one entry per shot:
+{"shots":[{"shot": INT, "algorithm": STRING, "reason": STRING}]}"""
+
 CONTENT_EDIT_SYSTEM = """You are the editor for one short-form vertical video clip. You receive: (a) the clip's transcript slice with indexes, (b) detected scene-change timestamps, and (c) the candidate clip's original score and rationale.
 
 Produce TWO things:

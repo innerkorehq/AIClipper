@@ -2,9 +2,12 @@
 //! writing its output through the `ArtifactStore` so runs resume (PRD §9).
 
 pub mod audio_events;
+pub mod chooser;
 pub mod content_edit;
 pub mod export;
+pub mod framing;
 pub mod ingest;
+pub mod motion;
 pub mod render;
 pub mod requests;
 pub mod rough_cut;

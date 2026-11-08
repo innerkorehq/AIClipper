@@ -14,6 +14,14 @@ export type ShotSegment = {
   start_frame: number;
   end_frame: number;
   strategy: ShotStrategy;
+  /** Framing algorithm chosen for this shot (empty on older manifests). */
+  algorithm?: string;
+  /** How the crop window is derived: max | fit | zoom | split | contain. */
+  window?: string;
+  /** Zoom factor for window = "zoom" (> 1 = tighter than the largest window). */
+  zoom?: number;
+  /** "face" (grown to head-and-shoulders) or "region" (used as is). */
+  subject?: string;
   keyframes: BBoxKeyframe[];
   /** Optional second-subject track for split-screen two-speaker shots. */
   second_keyframes?: BBoxKeyframe[];

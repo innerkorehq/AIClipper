@@ -136,7 +136,9 @@ export type ShotLayout = "single" | "split" | "wide";
  * wide:   action / fallback — whole scene centred, captions in the gaps.
  */
 export function shotLayout(seg: ShotSegment): ShotLayout {
-  if (seg.strategy !== "face_crop") {
+  // The algorithm's window policy says it directly; older manifests (no
+  // algorithm) are framed from the strategy as before.
+  if (seg.window === "contain" || (!seg.algorithm && seg.strategy !== "face_crop")) {
     return "wide";
   }
   return seg.split && seg.second_keyframes && seg.second_keyframes.length > 0 ? "split" : "single";
@@ -172,6 +174,59 @@ function maxWindowBox(
     w: nw,
     h: nh,
   };
+}
+
+/**
+ * The crop window for one frame of a single-subject shot, from the shot's window
+ * policy (set by the framing algorithm the chooser picked):
+ *   max  — the largest 9:16 window centred on the subject (default)
+ *   zoom — that window shrunk by `zoom`, centred on the face with a little
+ *          headroom: a tight punch-in
+ *   fit  — the smallest window that contains the whole box with a margin, so
+ *          nobody in a group is cropped. Returns null when the box is wider than
+ *          any window (the caller then shows the whole scene instead).
+ */
+export function singleWindow(
+  seg: Pick<ShotSegment, "window" | "zoom">,
+  face: BBoxKeyframe,
+  subject: BBoxKeyframe,
+  srcW: number,
+  srcH: number,
+  canvasW: number,
+  canvasH: number,
+): BBoxKeyframe | null {
+  const max = maxWindowBox(subject, srcW, srcH, canvasW, canvasH);
+  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+  const mode = seg.window || "max";
+
+  if (mode === "zoom") {
+    const z = seg.zoom && seg.zoom > 1 ? seg.zoom : 1.45;
+    const w = max.w / z;
+    const h = max.h / z;
+    const cx = face.x + face.w / 2;
+    const cy = face.y + face.h / 2 + 0.18 * h; // face sits in the upper part, with headroom for hair
+    return {frame: subject.frame, x: clamp(cx - w / 2, 0, 1 - w), y: clamp(cy - h / 2, 0, 1 - h), w, h};
+  }
+
+  if (mode === "fit") {
+    const target = canvasW / canvasH;
+    const maxPx = max.w * srcW;
+    const needW = subject.w * srcW * 1.12;
+    const needH = subject.h * srcH * 1.12;
+    // never tighter than 45% of the largest window: a tiny group is not a punch-in
+    const wPx = Math.max(needW, needH * target, 0.45 * maxPx);
+    if (wPx > maxPx * 1.001) {
+      return null;
+    }
+    const fitPx = Math.min(wPx, maxPx); // the 0.1% tolerance above must not overshoot the frame
+    const w = fitPx / srcW;
+    const h = fitPx / target / srcH;
+    const cx = subject.x + subject.w / 2;
+    const cy = subject.y + subject.h / 2;
+    return {frame: subject.frame, x: clamp(cx - w / 2, 0, 1 - w), y: clamp(cy - h / 2, 0, 1 - h), w, h};
+  }
+
+  return max;
 }
 
 type Actor = {face: BBoxKeyframe; subject: BBoxKeyframe};
@@ -322,7 +377,9 @@ export const ShotLayer: React.FC<{
     if (shotLayout(seg) === "wide") {
       return null;
     }
-    return expandSubject(bbox);
+    // A face box is grown to head-and-shoulders; a region (group, saliency,
+    // motion) is already the right size.
+    return seg.subject === "region" ? bbox : expandSubject(bbox);
   }, [bbox, seg]);
   const secondSubject = useMemo(
     () => (secondBBox ? expandSubject(secondBBox) : null),
@@ -345,8 +402,9 @@ export const ShotLayer: React.FC<{
   // tracked subject is already tall enough to fill the 9:16 canvas (its pixel
   // aspect >= canvas aspect). Otherwise fall back to blurred background.
   const maxWindow =
-    subject !== null ? maxWindowBox(subject, sourceW, sourceH, width, height) : null;
-  // Single-subject shots always use the maximal window around the subject.
+    subject !== null ? singleWindow(seg, bbox, subject, sourceW, sourceH, width, height) : null;
+  // A window exists for every policy except a group that is wider than any window
+  // ("fit" → null), which falls through to showing the whole scene.
   const canCropClean = subject !== null && maxWindow !== null;
   const split = secondSubject !== null && subject !== null;
 

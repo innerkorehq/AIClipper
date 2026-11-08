@@ -435,6 +435,51 @@ def select_clips(
     return out, [best[r["id"]] for r in requests], "\n---\n".join(raws), "\n\n".join(prompt_log)
 
 
+def choose_framing(
+    model_id: str,
+    shots: list[dict],
+    menu: list[dict],
+    context: str,
+    ask: str,
+    max_tokens: int,
+) -> tuple[list[dict], str, str]:
+    """Pick a framing algorithm per shot. `shots` carry measurements and the list of
+    algorithms that can run on them; `menu` is [{name, use}]. Returns one choice per
+    answered shot ({shot, algorithm, reason}); invalid ones are the caller's to repair."""
+    system = prompts.FRAMING_SYSTEM
+    menu_text = "\n".join(f"- {m['name']}: {m['use']}" for m in menu)
+    chunks = [shots[i:i + 30] for i in range(0, len(shots), 30)] or [[]]
+    out: list[dict] = []
+    raws: list[str] = []
+    log: list[str] = []
+    for chunk in chunks:
+        if not chunk:
+            continue
+        user = (
+            f"MENU:\n{menu_text}\n\n"
+            + (f"VIDEO CONTEXT:\n{context}\n\n" if context else "")
+            + (f"REQUEST: {ask}\n\n" if ask else "")
+            + "SHOTS (measurements; `feasible` = algorithms that can run):\n"
+            + json.dumps(chunk, ensure_ascii=False)
+            + "\nOutput the JSON now."
+        )
+        log.append(user)
+        try:
+            data, raw = _generate_json(model_id, system, user, max_tokens)
+        except ValueError:
+            continue
+        raws.append(raw)
+        items = data.get("shots") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            try:
+                out.append({"shot": int(it["shot"]), "algorithm": str(it["algorithm"]), "reason": str(it.get("reason", ""))})
+            except (KeyError, TypeError, ValueError):
+                continue
+    return out, "\n---\n".join(raws), "\n\n".join(log)
+
+
 def content_edit(
     model_id: str,
     candidate: dict,

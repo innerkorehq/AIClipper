@@ -223,6 +223,42 @@ impl SidecarClient {
         Ok(Transcript { words: out.words })
     }
 
+    /// Ask the model to choose a framing algorithm for each shot. `feats` are the
+    /// shots' measurements; each is sent with the algorithms that can run on it.
+    pub async fn choose_framing(
+        &self,
+        feats: &[crate::stages::framing::ShotFeatures],
+        context: &str,
+        ask: &str,
+        cfg: &Config,
+    ) -> Result<Vec<crate::stages::chooser::RawChoice>> {
+        let shots: Vec<serde_json::Value> = feats
+            .iter()
+            .map(|f| {
+                let mut v = f.to_json();
+                v["feasible"] = json!(crate::stages::chooser::feasible_names(f));
+                v
+            })
+            .collect();
+        let menu: Vec<serde_json::Value> =
+            crate::stages::chooser::menu().iter().map(|(n, u)| json!({"name": n, "use": u})).collect();
+        let body = json!({
+            "model": cfg.llm_model,
+            "shots": shots,
+            "menu": menu,
+            "context": context,
+            "ask": ask,
+            "max_tokens": cfg.llm_max_tokens,
+        });
+        #[derive(Deserialize)]
+        struct Resp {
+            choices: Vec<crate::stages::chooser::RawChoice>,
+        }
+        let out: Resp = self.call("/v1/choose_framing", body.clone(), "choose_framing").await?;
+        crate::util::log_llm_call(&self.llm_log, "choose_framing", &body, &serde_json::json!({"choices": out.choices.len()}));
+        Ok(out.choices)
+    }
+
     /// Find clips for client requests (one proposal pass covers all requests).
     /// `extra` = (request id, start, end, source) spans found by audio analysis.
     pub async fn select_clips(
