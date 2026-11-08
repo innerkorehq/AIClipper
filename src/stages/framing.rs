@@ -376,8 +376,12 @@ pub fn feasible(algo: Algo, f: &ShotFeatures) -> bool {
         Algo::WideBlur => true,
         Algo::FaceFollow => has_faces,
         Algo::PunchIn => has_faces && f.duration_s <= PUNCH_IN_MAX_S,
-        Algo::SpeakerFollow | Algo::SplitTwo => f.faces_max >= 2 && f.face_presence >= 0.4,
-        Algo::GroupFit => f.faces_max >= 2 && f.face_presence >= 0.4,
+        Algo::SpeakerFollow => f.faces_max >= 2 && f.face_presence >= 0.4,
+        // A split shows exactly two people: it needs two faces *consistently* (a second
+        // face that flickers in for a few frames is not a second person), and it would
+        // drop someone if three or more are on screen.
+        Algo::SplitTwo => f.faces_median >= 2.0 && f.faces_median < 3.0 && f.face_presence >= 0.4,
+        Algo::GroupFit => f.faces_median >= 2.0 && f.face_presence >= 0.4,
         // fixed window: only if what it frames holds still
         Algo::Locked => {
             if has_faces {
@@ -497,6 +501,24 @@ mod tests {
     }
 
     #[test]
+    fn a_split_needs_exactly_two_consistent_people() {
+        let mut two = f();
+        two.faces_median = 2.0;
+        two.faces_max = 2;
+        assert!(feasible(Algo::SplitTwo, &two) && feasible(Algo::GroupFit, &two));
+        let mut three = f();
+        three.faces_median = 3.0;
+        three.faces_max = 4;
+        assert!(!feasible(Algo::SplitTwo, &three), "a split would drop the third person");
+        assert!(feasible(Algo::GroupFit, &three) && feasible(Algo::SpeakerFollow, &three));
+        let mut flicker = f(); // one face most of the time, a second appears in a few frames
+        flicker.faces_median = 1.0;
+        flicker.faces_max = 3;
+        assert!(!feasible(Algo::SplitTwo, &flicker) && !feasible(Algo::GroupFit, &flicker));
+        assert!(feasible(Algo::SpeakerFollow, &flicker), "speaker_follow tolerates a flickering second face");
+    }
+
+    #[test]
     fn common_sense_limits_on_the_dramatic_choices() {
         let mut calm = f(); // one still face, static picture, 5s
         assert!(feasible(Algo::PunchIn, &calm));
@@ -552,7 +574,7 @@ mod tests {
         group.faces_max = 5;
         assert_eq!(rules_default(&group), Algo::GroupFit);
         let mut panel = f();
-        panel.faces_max = 2; // two faces but not classified split: follow the speaker
+        panel.faces_max = 2; // a second face now and then, not classified split: follow the speaker
         panel.faces_median = 1.0;
         assert_eq!(rules_default(&panel), Algo::SpeakerFollow);
         let mut action = f();
