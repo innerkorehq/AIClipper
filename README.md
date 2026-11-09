@@ -76,17 +76,35 @@ fits the footage, the request and what the video is, and says why. Code only gua
 or impossible pick is replaced by the default and the reason recorded) and covers for a model that is
 unavailable.
 
-| algorithm | what it does |
-|---|---|
-| `face_follow` | follows the main face, full-height vertical window |
-| `speaker_follow` | follows whoever is speaking among several faces |
-| `split_two` | two people stacked, each fixed to their own half |
-| `group_fit` | a window just large enough to contain every face |
-| `punch_in` | tight zoom on one face (emphasis/reaction; short shots only) |
-| `locked` | one fixed window, no camera motion (still subjects) |
-| `saliency_follow` | follows the visually salient region (no faces needed) |
-| `motion_follow` | follows where the motion is (action, sports, dance) |
-| `wide_blur` | whole scene centred over a blurred fill (nothing cropped) |
+| algorithm | what it does | can run when |
+|---|---|---|
+| `face_follow` | follows the main face, full-height vertical window | a face is present in at least 40% of the shot |
+| `speaker_follow` | follows whoever is speaking among several faces | two or more faces appear |
+| `split_two` | two people stacked, each fixed to their own half | exactly two people consistently (a split would drop a third) |
+| `group_fit` | a window just large enough to contain every face | two or more people consistently |
+| `punch_in` | tight zoom on one face (emphasis/reaction) | a face is present and the shot is 6 s or shorter |
+| `locked` | one fixed window, no camera motion | what it frames holds still (face movement under 0.08 of the frame width) |
+| `saliency_follow` | follows the visually salient region (no faces needed) | attention has a clear focal point |
+| `motion_follow` | follows where the motion is (action, sports, dance) | the shot is busy, or a distinct moving region is present in at least half of it |
+| `wide_blur` | whole scene centred over a blurred fill (nothing cropped) | always |
+
+`group_fit` never crops anyone out. A group wider than a vertical window is shown letterboxed over a
+blurred fill, so three people across a 16:9 frame come out small. That is expected, not a failure.
+
+**What counts as a person.** The chooser only sees faces that are people. Face detection also fires on
+printed photos (a WANTED poster, a framed portrait) and on cardboard cutouts, and counting those would
+send a two-person shot to a group fit. Two conservative filters remove them before any measurement
+(`src/vision/decoys.rs`):
+
+- **Printed photos** are nearly colourless (colour saturation about 0.1, against about 0.5 for a living
+  face). A face is dropped only when it is both nearly colourless and much less colourful than another
+  face in the same frame, so a black-and-white film loses nothing.
+- **Cutouts** do not move at all, while real faces drift. A face whose box stays pixel-identical across a
+  shot, in a picture where other faces do move, is dropped. If everyone is still, nothing is dropped.
+
+Both tests keep a face when in doubt (a lone face, a short shot, or an unknown colour value). The colour
+values are cached with the face detections, so work folders from before this change need a fresh
+`--workdir` to get the printed-photo filter.
 
 `--framing auto` (default, the AI chooses) · `--framing rules` (deterministic, no model) ·
 `--framing <algorithm>` (force one where it can run; for debugging/comparison). What was chosen for every
