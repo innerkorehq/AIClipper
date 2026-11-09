@@ -2,7 +2,6 @@
 name = "aiclipper"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
 description = "Fully local, offline short-form video clipping pipeline"
 license = "MIT"
 
