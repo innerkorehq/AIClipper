@@ -3,6 +3,7 @@
 //! (§5.7), and the trajectory builder (§5.8). Degrades gracefully to a
 //! no-Vision mode with a clear error if the shim cannot be loaded.
 
+pub mod decoys;
 pub mod shim;
 
 pub use shim::{FaceRect, MouthLandmarks, SaliencyGrid, VisionShim};

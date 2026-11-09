@@ -155,6 +155,44 @@ public func shim_face_landmarks(path: UnsafePointer<CChar>?, out: UnsafeMutableP
     return Int32(count)
 }
 
+// MARK: - face colourfulness
+
+/// Mean colour saturation (0..1, HSV-style) inside each of `n` face rectangles.
+/// `rects` holds `n` records of 4 floats [x, y, w, h] (normalized, top-left origin).
+/// A printed black-and-white or sepia photo of a face (a poster, a framed portrait)
+/// is far less saturated than a living face. Returns n, or -1 on error.
+@_cdecl("shim_face_saturation")
+public func shim_face_saturation(path: UnsafePointer<CChar>?, rects: UnsafePointer<Float>?, n: Int32, out: UnsafeMutablePointer<Float>?) -> Int32 {
+    guard let cg = loadCGImage(path), let rects = rects, let out = out, n >= 0 else { return -1 }
+    let W = Float(cg.width), H = Float(cg.height)
+    let side = 32
+    for i in 0..<Int(n) {
+        let x = rects[i * 4], y = rects[i * 4 + 1], w = rects[i * 4 + 2], h = rects[i * 4 + 3]
+        let r = CGRect(x: CGFloat(max(0, x * W)), y: CGFloat(max(0, y * H)),
+                       width: CGFloat(max(1, w * W)), height: CGFloat(max(1, h * H)))
+        guard let crop = cg.cropping(to: r.integral) else { out[i] = -1; continue }
+        var px = [UInt8](repeating: 0, count: side * side * 4)
+        let space = CGColorSpaceCreateDeviceRGB()
+        let ok: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side * 4, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.interpolationQuality = .low
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        if !ok { out[i] = -1; continue }
+        var sum: Float = 0
+        for k in 0..<(side * side) {
+            let r8 = Float(px[k * 4]), g8 = Float(px[k * 4 + 1]), b8 = Float(px[k * 4 + 2])
+            let mx = max(r8, g8, b8), mn = min(r8, g8, b8)
+            sum += (mx - mn) / (mx + 1)
+        }
+        out[i] = sum / Float(side * side)
+    }
+    return n
+}
+
 // MARK: - image loading
 
 private func loadCGImage(_ path: UnsafePointer<CChar>?) -> CGImage? {

@@ -14,6 +14,15 @@ pub struct FaceRect {
     /// Normalized [0,1], top-left origin.
     pub bbox: crate::types::BBox,
     pub confidence: f32,
+    /// Mean colour saturation inside the box (0..1); negative when unknown (an older
+    /// cache, or a shim without the probe). A printed black-and-white photo of a face
+    /// reads ~0.1, a living face ~0.5.
+    #[serde(default = "unknown_saturation")]
+    pub saturation: f32,
+}
+
+fn unknown_saturation() -> f32 {
+    -1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +43,7 @@ pub struct MouthLandmarks {
 type FacesFn = unsafe extern "C" fn(*const std::os::raw::c_char, *mut f32, i32) -> i32;
 type SaliencyFn = unsafe extern "C" fn(*const std::os::raw::c_char, *mut f32, *mut i32, *mut i32) -> i32;
 type LandmarksFn = unsafe extern "C" fn(*const std::os::raw::c_char, *mut f32, i32) -> i32;
+type SaturationFn = unsafe extern "C" fn(*const std::os::raw::c_char, *const f32, i32, *mut f32) -> i32;
 type VersionFn = unsafe extern "C" fn() -> i32;
 
 #[allow(dead_code)]
@@ -44,6 +54,8 @@ pub struct VisionShim {
     saliency_objectness: Symbol<'static, SaliencyFn>,
     landmarks: Symbol<'static, LandmarksFn>,
     _version: Symbol<'static, VersionFn>,
+    /// Absent in a shim built before the probe existed.
+    saturation: Option<Symbol<'static, SaturationFn>>,
 }
 
 impl VisionShim {
@@ -75,6 +87,7 @@ impl VisionShim {
             saliency_objectness: unsafe { lib.get(b"shim_saliency_objectness\0") }?,
             landmarks: unsafe { lib.get(b"shim_face_landmarks\0") }?,
             _version: unsafe { lib.get(b"shim_version\0") }?,
+            saturation: unsafe { lib.get(b"shim_face_saturation\0") }.ok(),
             _lib: lib,
         })
     }
@@ -97,7 +110,18 @@ impl VisionShim {
                     h: buf[i * 5 + 3],
                 },
                 confidence: buf[i * 5 + 4],
+                saturation: -1.0,
             });
+        }
+        if let (Some(sat), false) = (&self.saturation, out.is_empty()) {
+            let rects: Vec<f32> = out.iter().flat_map(|f| [f.bbox.x, f.bbox.y, f.bbox.w, f.bbox.h]).collect();
+            let mut vals = vec![-1f32; out.len()];
+            let n = unsafe { (sat)(path.as_ptr(), rects.as_ptr(), out.len() as i32, vals.as_mut_ptr()) };
+            if n >= 0 {
+                for (f, v) in out.iter_mut().zip(vals) {
+                    f.saturation = v;
+                }
+            }
         }
         Ok(out)
     }

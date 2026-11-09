@@ -108,7 +108,12 @@ async fn classify_one(
 
     // Vision reads from the rough-cut file, whose timeline starts at 0.
     let rough_times: Vec<f64> = times.iter().map(|t| (t - offset_s).max(0.0)).collect();
-    let face_sets = vision.faces_at(rough, &rough_times).await?;
+    let mut face_sets = vision.faces_at(rough, &rough_times).await?;
+    // Posters, framed portraits and cardboard cutouts are not people.
+    let dropped = crate::vision::decoys::drop_decoys(&mut face_sets);
+    if dropped > 0 {
+        tracing::info!("shot [{:.1}s–{:.1}s]: ignored {dropped} face detection(s) that are not people (printed photo / cutout)", shot.start, shot.end);
+    }
     let saliencies = vision.saliency_at(rough, &rough_times).await?;
 
     let mut samples = Vec::with_capacity(times.len());

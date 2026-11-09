@@ -531,7 +531,7 @@ mod split_tests {
     use crate::vision::FaceRect;
 
     fn face(x: f32) -> FaceRect {
-        FaceRect { bbox: BBox { x, y: 0.3, w: 0.12, h: 0.2 }, confidence: 0.9 }
+        FaceRect { bbox: BBox { x, y: 0.3, w: 0.12, h: 0.2 }, confidence: 0.9, saturation: -1.0 }
     }
 
     fn shot(per_sample: Vec<Vec<FaceRect>>) -> ShotClassified {
@@ -590,7 +590,7 @@ mod algo_tests {
     use crate::vision::FaceRect;
 
     fn face(x: f32, y: f32, w: f32) -> FaceRect {
-        FaceRect { bbox: BBox { x, y, w, h: w * 1.4 }, confidence: 0.9 }
+        FaceRect { bbox: BBox { x, y, w, h: w * 1.4 }, confidence: 0.9, saturation: -1.0 }
     }
 
     fn shot(per_sample: Vec<Vec<FaceRect>>) -> ShotClassified {
