@@ -171,6 +171,28 @@ Requires:
 - Python sidecar deps: `python_sidecar/requirements.txt`
 - Remotion deps: `cd remotion && npm install`
 
+## Settings (`.env`)
+
+Settings are environment variables (`AICLIPPER_*`, plus `HF_TOKEN` for diarization). Put them in a
+`.env` file instead of exporting them each time:
+
+```bash
+cp .env.example .env     # then edit; .env is git-ignored
+```
+
+`.env.example` lists every setting with its default and a one-line explanation. The file is read at
+startup from the current directory and from the project root, and a variable already set in your shell
+always wins over it. The ones you are most likely to change:
+
+| variable | default | what it does |
+|---|---|---|
+| `AICLIPPER_WHISPER_BACKEND` | `cpp` | `hf` uses the Hinglish transformers model for transcription. With `cpp`, a broken transcript (words piled on one timestamp or past the end of the audio) is redone with it automatically |
+| `AICLIPPER_WHISPER_LANG` | `auto` | spoken language for whisper.cpp (`hi`, `en`, ...) |
+| `AICLIPPER_LLM_MODEL` | Gemma 4 e2b 4-bit (MLX) | the local model that picks clips and directs framing |
+| `AICLIPPER_MIN_CLIP_SCORE` | `0.3` | lowest rating an AI-picked clip needs |
+| `AICLIPPER_MIN_RELEVANCE` | `0.6` | lowest relevance for `--ask` / `--brief` clips |
+| `HF_TOKEN` | unset | Hugging Face read token for the gated pyannote diarization model |
+
 ## Stages & resumability
 
 Every stage writes a JSON artifact into `<workdir>/stages/<stage>.json`. A re-run skips any stage whose artifact already exists (unless `--force`). Gemma stages record rationale for auditability.

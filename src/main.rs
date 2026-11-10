@@ -8,6 +8,7 @@
 mod artifact;
 mod cli;
 mod config;
+mod dotenv;
 mod sidecar;
 mod stages;
 mod types;
@@ -33,8 +34,15 @@ use tokio::process::Child;
 const TARGET_WIDTH: u32 = 1080;
 const TARGET_HEIGHT: u32 = 1920;
 
+fn main() -> Result<()> {
+    // Settings from `.env` go into the environment before any thread starts: the config
+    // and the Python sidecar both read them from there.
+    let env_files = dotenv::load();
+    real_main(env_files)
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn real_main(env_files: Vec<(PathBuf, usize)>) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -42,6 +50,9 @@ async fn main() -> Result<()> {
         )
         .with_target(false)
         .init();
+    for (path, n) in &env_files {
+        tracing::info!("loaded {n} setting(s) from {}", path.display());
+    }
 
     let cli = Cli::parse();
     let exit = run(cli).await;

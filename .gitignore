@@ -16,3 +16,5 @@ __pycache__
 *.webm
 *.wav
 *.m4a
+# local secrets and settings
+.env
