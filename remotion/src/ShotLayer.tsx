@@ -275,8 +275,13 @@ export function splitWindows(
 
   const make = (L: number, w: number, who: Actor): BBoxKeyframe => {
     const h = w / target;
-    const cy = (who.subject.y + who.subject.h / 2) * srcH;
-    const t = clamp(cy - h / 2, 0, srcH - h);
+    // Vertical: the face sits in the upper part of its panel with room for hair or a
+    // hat, and the top of the head is always inside. (The subject box runs from above
+    // the head to the bottom of the frame, so centring on IT puts the window far too
+    // low and cuts the heads off.)
+    const faceCy = (who.face.y + who.face.h / 2) * srcH;
+    const headTop = who.subject.y * srcH;
+    const t = clamp(Math.min(faceCy - 0.4 * h, headTop - 0.04 * h), 0, srcH - h);
     return {frame: who.subject.frame, x: L / srcW, y: t / srcH, w: w / srcW, h: h / srcH};
   };
   const result = (l1: number, l2: number, w: number) => {

@@ -82,28 +82,83 @@ pub async fn transcribe(cfg: &Config, source: &Path, client: &SidecarClient) -> 
     extract_wav(cfg, source, &wav).await?;
 
     if cfg.whisper_backend == "hf" {
-        tracing::info!(
-            "transcribing with transformers model `{}` (Hinglish/word-level)",
-            cfg.whisper_hf_model
-        );
-        // Cache the raw model output (slow to produce) so cleanup rules can be
-        // re-applied without re-transcribing.
-        let slug: String = cfg.whisper_hf_model.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
-        let raw_path = cfg.media_dir().join(format!("transcript_hf_{slug}.json"));
-        let raw_words: Vec<Word> = match std::fs::read(&raw_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
-            Some(w) => {
-                tracing::info!("reusing raw transcription {}", raw_path.display());
-                w
-            }
-            None => {
-                let t = client.transcribe_hf(&wav, &cfg.whisper_hf_model).await?;
-                std::fs::write(&raw_path, serde_json::to_vec(&t.words)?)?;
-                t.words
-            }
-        };
-        return Ok(Transcript { words: clean_words(raw_words)? });
+        return transcribe_hf(cfg, client, &wav).await;
     }
 
+    let t = transcribe_cpp(cfg, &wav).await?;
+    // whisper.cpp's small models fall apart on conversational Hinglish: words pile up on
+    // one timestamp, phrases loop, and words land after the end of the audio. Captions built
+    // from that are out of sync and wrong, so redo it with the Hinglish model instead.
+    let audio_s = wav_seconds(&wav);
+    if let Some(why) = unreliable_reason(&t.words, audio_s) {
+        tracing::warn!(
+            "whisper.cpp transcript is unreliable ({why}); redoing it with `{}`",
+            cfg.whisper_hf_model
+        );
+        match transcribe_hf(cfg, client, &wav).await {
+            Ok(h) => match unreliable_reason(&h.words, audio_s) {
+                None => return Ok(h),
+                Some(w2) => tracing::warn!("the Hinglish transcript is also unreliable ({w2}); keeping whisper.cpp's"),
+            },
+            Err(e) => tracing::warn!("could not use the Hinglish model ({e:#}); keeping whisper.cpp's transcript"),
+        }
+    }
+    Ok(t)
+}
+
+/// Duration of a 16 kHz mono 16-bit WAV (what `extract_wav` writes), from its size.
+fn wav_seconds(wav: &Path) -> f64 {
+    std::fs::metadata(wav).map(|m| m.len().saturating_sub(44) as f64 / 32_000.0).unwrap_or(0.0)
+}
+
+/// Why a transcript cannot be trusted for captions and clip timing, if it cannot.
+/// Real speech never puts several words on the same instant or past the end of the audio.
+pub fn unreliable_reason(words: &[Word], audio_s: f64) -> Option<String> {
+    if words.is_empty() {
+        return Some("no words".into());
+    }
+    if audio_s > 1.0 {
+        let late = words.iter().filter(|w| w.start > audio_s + 1.0).count();
+        if late > 0 {
+            return Some(format!("{late} word(s) placed after the end of the {audio_s:.0}s audio"));
+        }
+    }
+    // words sharing one start time (to 10 ms)
+    let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for w in words {
+        *counts.entry((w.start * 100.0).round() as i64).or_default() += 1;
+    }
+    let (at, n) = counts.iter().map(|(k, v)| (*k, *v)).max_by_key(|(_, v)| *v).unwrap_or((0, 0));
+    if n >= 5 {
+        return Some(format!("{n} words share the timestamp {:.1}s", at as f64 / 100.0));
+    }
+    None
+}
+
+async fn transcribe_hf(cfg: &Config, client: &SidecarClient, wav: &Path) -> Result<Transcript> {
+    tracing::info!(
+        "transcribing with transformers model `{}` (Hinglish/word-level)",
+        cfg.whisper_hf_model
+    );
+    // Cache the raw model output (slow to produce) so cleanup rules can be
+    // re-applied without re-transcribing.
+    let slug: String = cfg.whisper_hf_model.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    let raw_path = cfg.media_dir().join(format!("transcript_hf_{slug}.json"));
+    let raw_words: Vec<Word> = match std::fs::read(&raw_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        Some(w) => {
+            tracing::info!("reusing raw transcription {}", raw_path.display());
+            w
+        }
+        None => {
+            let t = client.transcribe_hf(wav, &cfg.whisper_hf_model).await?;
+            std::fs::write(&raw_path, serde_json::to_vec(&t.words)?)?;
+            t.words
+        }
+    };
+    Ok(Transcript { words: clean_words(raw_words)? })
+}
+
+async fn transcribe_cpp(cfg: &Config, wav: &Path) -> Result<Transcript> {
     let model = resolve_model(cfg)?;
     // `transcript_words` (not `transcript`): older runs cached 30s-segment output
     // under the previous name, which must not be reused as word-level data.
@@ -438,5 +493,21 @@ mod tests {
         assert_eq!((v[1].start, v[1].end), (1.0, 1.5));
         assert_eq!((v[2].start, v[2].end), (1.5, 2.0));
         assert_eq!(v[3].start, 2.0);
+    }
+
+    #[test]
+    fn a_transcript_with_words_piled_up_or_past_the_audio_is_unreliable() {
+        let w = |t: &str, s: f64| Word { text: t.into(), start: s, end: s + 0.2 };
+        let good: Vec<Word> = (0..20).map(|i| w("x", i as f64 * 0.5)).collect();
+        assert_eq!(unreliable_reason(&good, 10.0), None);
+        let mut piled = good.clone();
+        for p in piled.iter_mut().skip(8).take(6) {
+            p.start = 4.0; // six words on one instant
+        }
+        assert!(unreliable_reason(&piled, 10.0).unwrap().contains("share the timestamp"));
+        let mut late = good.clone();
+        late.push(w("y", 39.2)); // after the end of a 30s clip
+        assert!(unreliable_reason(&late, 30.0).unwrap().contains("after the end"));
+        assert!(unreliable_reason(&[], 30.0).is_some());
     }
 }
